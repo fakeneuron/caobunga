@@ -1,0 +1,25 @@
+# EditorConfig — Fleet HQ Tier-1 always-on deposit. https://editorconfig.org
+# Stack-agnostic formatting baseline; read natively by JetBrains and most
+# editors (VS Code via the EditorConfig extension, already in configs/.vscode).
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[*.py]
+indent_size = 4
+
+[*.go]
+indent_style = tab
+
+[Makefile]
+indent_style = tab
+
+# Markdown: trailing whitespace is significant (hard line breaks).
+[*.md]
+trim_trailing_whitespace = false

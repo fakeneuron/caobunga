@@ -1,0 +1,169 @@
+{
+  "$comment": "Checked-in key vocabulary for the /api/projects/{id} payload (CBN-EPIC-231.3). backend/tests/test_api_payload_keys.py derives each list from the live endpoint / pydantic models and asserts it matches this file; frontend/tests/unit/api-payload-keys.test.ts derives each list from frontend/src/api/types.ts and asserts the same. A key added on one side and not the other fails whichever suite reads this file. Order is not significant \u2014 both sides compare as sets. The last seven entries are the element shapes nested inside the first six (CBN-234): coverage_detail.denials[] / unparsed_rows[], tree_detail.blocking_lines[], run_record.new_rows[] / foreign_commits[] / suite / suite.verbs[]; the backend checks those by model_fields only, since several of the arrays are conditionally present and no single live payload carries every element. The enum_values block (CBN-263) is the value vocabulary of every StrEnum the payload serializes: backend/tests/test_api_payload_keys.py compares it to each enum's member values, the frontend test to each types.ts string-literal union, both as sets.",
+  "project_detail": [
+    "schema_version",
+    "id",
+    "path",
+    "tier",
+    "provider",
+    "model",
+    "providers",
+    "registered_at",
+    "enabled",
+    "current",
+    "coverage",
+    "tree",
+    "last_run",
+    "runs",
+    "run_counts",
+    "reports"
+  ],
+  "coverage_detail": [
+    "open",
+    "marked",
+    "denied",
+    "marked_tasks",
+    "unparsed",
+    "denials",
+    "unparsed_rows"
+  ],
+  "tree_detail": [
+    "readable",
+    "clean",
+    "blocking",
+    "candidate",
+    "exempt_task",
+    "clean_for",
+    "blocking_lines"
+  ],
+  "current_task": [
+    "task_id",
+    "status",
+    "reason",
+    "plan_model",
+    "shortname"
+  ],
+  "reports": [
+    "last_rollup"
+  ],
+  "run_record": [
+    "schema_version",
+    "project",
+    "task_id",
+    "invocation_id",
+    "outcome",
+    "commit_sha",
+    "started_at",
+    "closed_at",
+    "escalation_reason",
+    "park_reason",
+    "eligibility_reason",
+    "hermes_review",
+    "hermes_verdict",
+    "hermes_verdict_code",
+    "hermes_missing_servers",
+    "provider",
+    "model",
+    "plan_model",
+    "next_task",
+    "tasknote_path",
+    "summary",
+    "follow_ups",
+    "marked_tasks",
+    "new_rows",
+    "log_path",
+    "foreign_commits",
+    "suite",
+    "external_review",
+    "exhausted_providers"
+  ],
+  "denial": [
+    "task_id",
+    "reason",
+    "line",
+    "text",
+    "seeded_line",
+    "unparsed_blocker",
+    "triage",
+    "triage_reason"
+  ],
+  "unparsed_row": [
+    "line",
+    "text"
+  ],
+  "dirt_line": [
+    "text",
+    "path",
+    "task_id"
+  ],
+  "new_row": [
+    "task_id",
+    "unattended"
+  ],
+  "foreign_commit": [
+    "sha",
+    "author",
+    "subject"
+  ],
+  "suite": [
+    "verdict",
+    "verbs"
+  ],
+  "suite_verb": [
+    "verb",
+    "exit_code",
+    "duration",
+    "timed_out",
+    "refused",
+    "tree_changed",
+    "detail"
+  ],
+  "enum_values": {
+    "execution_tier": [
+      "observe",
+      "gated",
+      "proceed-on-green"
+    ],
+    "outcome": [
+      "closed",
+      "de-scoped",
+      "blocked",
+      "failed",
+      "no-tasknote"
+    ],
+    "escalation_reason": [
+      "note-blocked",
+      "worker-parked",
+      "worker-launch",
+      "worker-error",
+      "waiting-user",
+      "worker-exited",
+      "timeout"
+    ],
+    "hermes_review": [
+      "reviewed",
+      "skipped",
+      "degraded"
+    ],
+    "hermes_verdict_code": [
+      "accept",
+      "reject",
+      "inconclusive"
+    ],
+    "suite_verdict": [
+      "green",
+      "red",
+      "timeout",
+      "refused"
+    ],
+    "external_review": [
+      "ticked",
+      "na",
+      "missing"
+    ],
+    "triage_class": [
+      "obvious",
+      "needs-judgment"
+    ]
+  }
+}

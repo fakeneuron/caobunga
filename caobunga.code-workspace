@@ -1,0 +1,130 @@
+{
+  "folders": [
+    { "path": "." }
+  ],
+  "settings": {
+
+    // === Excludes ===
+    "files.watcherExclude": {
+      "**/.git/**": true,
+      "**/node_modules/**": true,
+      "**/__pycache__/**": true,
+      "**/dist/**": true,
+      "**/build/**": true,
+      "**/coverage/**": true,
+      "**/htmlcov/**": true,
+      "**/.cache/**": true,
+      "**/.pytest_cache/**": true,
+      "**/.mypy_cache/**": true,
+      "**/.ruff_cache/**": true,
+      "**/.next/**": true,
+      "**/.turbo/**": true,
+      "**/.pnpm-store/**": true,
+      "**/playwright-report/**": true,
+      "**/test-results/**": true,
+      "**/logs/**": true,
+      "**/.DS_Store": true,
+      "**/*.pyc": true,
+      "**/*.pyo": true,
+      "**/*.pyd": true
+    },
+    "search.exclude": {
+      "**/node_modules/**": true,
+      "**/__pycache__/**": true,
+      "**/dist/**": true,
+      "**/build/**": true,
+      "**/coverage/**": true,
+      "**/htmlcov/**": true,
+      "**/.cache/**": true,
+      "**/.pytest_cache/**": true,
+      "**/.mypy_cache/**": true,
+      "**/.ruff_cache/**": true,
+      "**/.next/**": true,
+      "**/.turbo/**": true,
+      "**/.pnpm-store/**": true,
+      "**/playwright-report/**": true,
+      "**/test-results/**": true,
+      "**/logs/**": true,
+      "**/*.pyc": true,
+      "**/*.pyo": true,
+      "**/*.pyd": true
+    },
+    "files.exclude": {
+      "**/.git/**": true,
+      "**/node_modules/**": true,
+      "**/__pycache__/**": true,
+      "**/.DS_Store": true,
+      "**/.pytest_cache/**": true,
+      "**/.mypy_cache/**": true,
+      "**/.ruff_cache/**": true,
+      "**/dist/**": true,
+      "**/build/**": true,
+      "**/coverage/**": true,
+      "**/htmlcov/**": true,
+      "**/.cache/**": true,
+      "**/.next/**": true,
+      "**/.turbo/**": true,
+      "**/.pnpm-store/**": true,
+      "**/playwright-report/**": true,
+      "**/test-results/**": true,
+      "**/logs/**": true,
+      "**/*.pyc": true,
+      "**/*.pyo": true,
+      "**/*.pyd": true
+    },
+
+    // === TypeScript / Node ===
+    "npm.autoDetect": "off",
+    "typescript.tsserver.maxTsServerMemory": 3072,
+    "typescript.tsserver.experimental.enableProjectDiagnostics": false,
+    "editor.largeFileOptimizations": true,
+    "files.maxMemoryForLargeFilesMB": 4096,
+
+    // === ESLint (flat-config) ===
+    // Adjust "directory" if your frontend isn't under "frontend/"; remove the block entirely for Python-only projects.
+    "eslint.useFlatConfig": true,
+    "eslint.workingDirectories": [
+      { "directory": "frontend", "changeProcessCWD": true }
+    ],
+    "eslint.validate": [
+      "javascript",
+      "javascriptreact",
+      "typescript",
+      "typescriptreact"
+    ],
+    "[javascript]": {
+      "editor.codeActionsOnSave": { "source.fixAll.eslint": "explicit" }
+    },
+    "[javascriptreact]": {
+      "editor.codeActionsOnSave": { "source.fixAll.eslint": "explicit" }
+    },
+    "[typescript]": {
+      "editor.codeActionsOnSave": { "source.fixAll.eslint": "explicit" }
+    },
+    "[typescriptreact]": {
+      "editor.codeActionsOnSave": { "source.fixAll.eslint": "explicit" }
+    },
+
+    // === Python / Ruff ===
+    "python.analysis.inlayHints.functionReturnTypes": false,
+    "python.analysis.inlayHints.variableTypes": false,
+    "python.analysis.autoImportCompletions": false,
+    "python.analysis.memory.keepLibraryAst": false,
+    "pyright.disableOrganizeImports": true,
+    "ruff.configurationPreference": "filesystemFirst", // line-length intentionally omitted — filesystemFirst defers to pyproject.toml
+    "ruff.nativeServer": "on",
+    "ruff.importStrategy": "fromEnvironment",
+    "[python]": {
+      "editor.defaultFormatter": "charliermarsh.ruff",
+      "editor.formatOnSave": true,
+      "editor.formatOnSaveMode": "file",
+      "python.testing.pytestEnabled": true,
+      // Adjust for monorepo layout, e.g. "${workspaceFolder}/backend"
+      "python.testing.cwd": "${workspaceFolder}",
+      "python.analysis.diagnosticMode": "workspace",
+      "python.analysis.typeCheckingMode": "standard"
+    },
+    "python.terminal.activateEnvironment": true,
+    "cursorpyright.analysis.typeCheckingMode": "standard"
+  }
+}

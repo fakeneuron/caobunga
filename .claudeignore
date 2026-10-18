@@ -1,0 +1,50 @@
+# Kept in sync with .cursorignore — update both when policy changes.
+
+# Build artifacts & caches
+node_modules/
+dist/
+build/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.hypothesis/
+.tox/
+.nox/
+*.egg-info/
+.eslintcache
+*.tsbuildinfo
+.ipynb_checkpoints/
+
+# Test & coverage output
+coverage.xml
+coverage/
+htmlcov/
+.coverage
+playwright-report*/
+test-results/
+.playwright-mcp/
+.flaitron/screenshots/
+
+# Logs
+*.log
+
+# Lock files — large, derivable from manifest; uncomment to exclude from indexing
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
+# poetry.lock
+
+# OS / editor noise
+.DS_Store
+*.suo
+*.sw?
+
+# Personal scratch
+SCRATCHPAD.md
+
+# Secrets
+.env
+!.env.example

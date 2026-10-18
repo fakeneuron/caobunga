@@ -1,0 +1,74 @@
+# gitleaks baseline (Fleet HQ Tier-1 deposit). Extends the upstream default
+# ruleset and allowlists the false-positive classes the NAT-117 fleet
+# measurement actually produced — nothing speculative.
+#
+# Consumed by three instruments, all of which pass this file explicitly:
+#   - the gitleaks pre-commit hook (.pre-commit-config.yaml, staged-only)
+#   - the CI secret-scan step (.github/workflows/ci.yml, working tree)
+#   - Fleet HQ's fleet-audit tracked-content secrets axis (HEAD tree)
+#
+# Base-stable: refreshable via Fleet HQ's layer-refresh skill. A repo that needs a
+# project-specific allowlist diverges deliberately — review the
+# inline diff at the refresh confirm before overwriting it.
+title = "Fleet HQ gitleaks baseline"
+
+[extend]
+useDefault = true
+
+# ── Allowlists ────────────────────────────────────────────────────────────────
+#
+# Every path below was measured, not guessed. Across 22 fleet roots the default
+# ruleset produced 17 HEAD-tracked hits, all of them `generic-api-key`. The
+# three classes allowlisted here account for 12; this config deliberately still
+# reports the other 5 (one repo's production source ×2, another repo's setup docs
+# ×3) because those are per-repo judgments, not universal ones — they belong in
+# a repo-local .gitleaks.toml allowlist, the way one fleet repo already handles
+# its own. Universal classes here; project-specific noise there.
+#
+# Scoping by path rather than disabling generic-api-key globally keeps every
+# high-confidence rule — aws, jwt, github-pat, private-key, stripe — live
+# everywhere, including inside these files. That matters: the one genuine hit
+# the fleet measurement found was a `jwt`, not a generic key.
+
+[[allowlists]]
+description = """
+Archived flaitron tasknotes. Write-once by policy (SPEC §"Tasknote
+frontmatter"), so a false positive in one cannot be fixed by editing the
+historical record. Prose in a closed tasknote is documentation of past work,
+never a live credential surface.
+Measured hits: two fleet repos' DEPLOY-004.md and FE-1.3.md.
+"""
+paths = ['''(^|/)\.flaitron/tasknote/archive/.*\.md$''']
+
+[[allowlists]]
+description = """
+Test fixtures and test modules. Fake credentials are the point of a credential
+test — a scanner hit here is the fixture working as designed. Scoped to test
+trees and the fleet's `*.test.sh` peer convention (CODING-STANDARDS.md
+§Testing), so production code carrying the same shape still fires.
+Measured hits: one repo's backend/tests/ (3 modules + 1 fixture script),
+another's backend/tests/services/, Fleet HQ's
+scripts/claude-allowlist.test.sh (curl-auth-header ×3, NAT-308).
+"""
+paths = [
+  '''(^|/)tests?/.*''',
+  '''(^|/)__tests__/.*''',
+  '''(^|/).*\.(test|spec)\.(ts|tsx|js|jsx|py)$''',
+  '''(^|/).*\.test\.sh$''',
+  '''(^|/)conftest\.py$''',
+]
+
+[[allowlists]]
+description = """
+Committed placeholder and template files. `.env.example` and its `*.template`
+equivalents exist to show the shape of a credential without carrying one —
+the same convention docs/FLEET-AUDIT-REGISTER.md §"Perimeter and archival
+doctrine" exempts from the on-disk credential-shaped-file class.
+Measured hits: one repo's .env.example + k8s/secret.yaml.template.
+"""
+paths = [
+  '''(^|/)\.env\.example$''',
+  '''(^|/)\.env\.sample$''',
+  '''(^|/).*\.template$''',
+  '''(^|/).*\.example$''',
+]

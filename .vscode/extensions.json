@@ -1,0 +1,9 @@
+{
+  "recommendations": [
+    "eamodio.gitlens",
+    "dbaeumer.vscode-eslint",
+    "ms-python.python",
+    "rust-lang.rust-analyzer",
+    "tamasfe.even-better-toml"
+  ]
+}

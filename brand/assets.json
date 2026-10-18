@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "project_id": "bf6ebc99-e095-4bd7-b8a2-26aac93a564b",
+  "display_name": "caobunga",
+  "copy_source": "brand/BRAND.md",
+  "assets": [],
+  "public_metadata": {
+    "disclosure": {
+      "value": "listed",
+      "evidence_paths": []
+    },
+    "release_stage": {
+      "value": "beta",
+      "evidence_paths": []
+    },
+    "public_availability": {
+      "value": "restricted",
+      "evidence_paths": []
+    },
+    "source_visibility": {
+      "value": "public",
+      "evidence_paths": []
+    }
+  }
+}

@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Favicon set, cut from repo-root brand/favicon.svg with ImageMagick
+         (not a build step; regenerate only when the mark changes), run from repo root:
+           magick brand/favicon.svg -resize 256x256 src-256.png
+           magick src-256.png -define icon:auto-resize=48,32,16 frontend/public/favicon.ico
+           magick src-256.png -resize 32x32 -background none -gravity center -extent 32x32 frontend/public/favicon-32x32.png
+           magick src-256.png -resize 150x150 -background "#1b6b6b" -gravity center -extent 180x180 frontend/public/apple-touch-icon.png
+         favicon.ico must exist as a real file: the Worker's SPA fallback would
+         otherwise answer /favicon.ico with index.html, which browsers cache as a
+         broken icon. apple-touch-icon is opaque because iOS flattens alpha to black. -->
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Caobunga — Status</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

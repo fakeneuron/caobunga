@@ -1,0 +1,103 @@
+# Caobunga uv project — Python CLI (click + rich) + FastAPI status API (CBN-040, :8013).
+# Layout: `backend/caobunga/` package + `backend/main.py` uvicorn launcher.
+
+[project]
+name = "caobunga"
+version = "0.1.0"
+description = "Multi-project Flaitron orchestrator"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic",
+    "httpx",
+    "click>=8",
+    "rich>=13",
+    "watchdog>=4",
+    "pyyaml>=6",
+]
+
+[project.scripts]
+caobunga = "caobunga.cli:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["caobunga"]
+
+[dependency-groups]
+dev = [
+    "ruff",
+    "pyright",
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+# Canonical fleet baseline — see Fleet HQ's docs/STACK-TENDENCIES.md §"Environment
+# & dependency management". Extend with `extend-select`; don't diverge on
+# line-length/target. `BLE001` is what enforces CODING-STANDARDS §"Error
+# handling" (no bare `except`). Ratcheted here at CBN-170: the pre-existing
+# backlog was fenced with `ruff check --add-noqa .` in its own commit and is
+# burned down lazily — a `# noqa` on a line is a fence, not an endorsement.
+select = [
+    "E", "F", "I", "W", "UP", "B",   # style, errors, imports, pyupgrade, bugbear
+    "BLE",                           # blind except  -> CODING-STANDARDS §Error handling
+    "S",                             # bandit security checks
+    "C90",                           # mccabe complexity (max 10, below)
+    "TRY",                           # exception antipatterns
+    "ERA",                           # commented-out code
+    "ARG",                           # unused arguments
+    "RUF",                           # ruff-specific rules
+]
+# TRY003 (long exception message outside the exception class) fights the house
+# `raise UserError(f"...")` idiom (CBN-EPIC-245.2) — ignored fleet-wide rather
+# than fenced per-call-site.
+ignore = ["TRY003"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.per-file-ignores]
+# pytest's bare `assert` is the assertion idiom; S101 bans it everywhere else.
+"tests/**" = ["S101"]
+
+# Python type gate — Fleet HQ's docs/STACK-TENDENCIES.md §"Continuous integration".
+# `standard` is pyright's own default, written explicitly to pin behaviour against
+# a future default shift. Do NOT add mypy alongside (one type checker). Standard
+# mode *checks* annotations; it does not *require* them. `uv run pyright` (never
+# `uvx`) so CI and `just typecheck` resolve the same pinned checker inside the
+# venv — outside it, every `caobunga.*` import reports as missing (CBN-170).
+[tool.pyright]
+typeCheckingMode = "standard"
+# Keep in step with `requires-python` above (3.13 per CBN-100).
+pythonVersion = "3.13"
+
+# Tests live in backend/tests/ (conftest.py holds fixtures). `pythonpath = ["."]`
+# puts the backend root on sys.path so tests can `from main import app`;
+# `asyncio_mode = "auto"` lets async tests run without per-test decorators.
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["."]
+testpaths = ["tests"]
+
+# Coverage feeds the CI changed-line gate (Fleet HQ's docs/STACK-TENDENCIES.md
+# §CI), which runs `pytest --cov=. --cov-report=xml` and hands the XML to
+# diff-cover. The flags stay in CI (and `just coverage`) rather than in
+# `addopts` on purpose: a local `pytest` should not pay for coverage
+# instrumentation on every run. `omit` keeps the gate's signal about *your*
+# code; `--cov=.` already walks the tree, so a never-imported new module is
+# reported at 0% rather than missing.
+[tool.coverage.run]
+branch = true
+omit = [
+    "tests/*",
+    ".venv/*",
+]

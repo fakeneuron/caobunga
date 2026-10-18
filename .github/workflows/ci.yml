@@ -1,0 +1,255 @@
+name: CI
+
+# Native-tool CI spine (Fleet HQ convention). Runs the quality gates directly
+# (npm / uv) rather than via `just`, matching how mature repos author CI. A
+# single job with a layout-detect step keeps the deposit layout-agnostic — it
+# covers subdir (frontend/ · backend/) and single-root repos alike out of the
+# box. As a repo grows (DB services, extra scans, parallel stacks), graduate to
+# per-stack jobs; the spine below (triggers · action floor · caching ·
+# concurrency · lint+typecheck+test gates · secret scan) stays the same.
+# See docs/STACK-TENDENCIES.md §"Continuous integration". Tier-1 always-on
+# deposit (Fleet HQ's init skill). Trim the stack you don't carry.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Changed-line coverage gate (see the coverage block near the bottom).
+  # Pin the tool deliberately, for the same reason GITLEAKS_VERSION is pinned:
+  # an unpinned checker changes its own findings between runs. This one is
+  # `uvx`-run rather than a dependency-group entry — unlike pyright it must
+  # also work in repos that carry no Python stack at all — so the pin is the
+  # only thing holding the version steady. The justfile's `coverage` recipe
+  # carries the same pin (`DC=`); bump both together.
+  DIFF_COVER_VERSION: '10.5.1'
+  # The gate is on NEW AND CHANGED lines only, never a whole-project
+  # percentage — Fleet HQ's docs/QUALITY-STACK.md rejected the global floor 2-1.
+  COVERAGE_MIN: '80'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      # `fetch-depth: 0` is required by the changed-line coverage gate below —
+      # a shallow clone cannot resolve `github.event.before` on a push, and the
+      # gate would silently degrade to "no lines with coverage information",
+      # which is indistinguishable from a well-covered diff. Drop it only
+      # alongside the coverage steps.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          # `.flaitron/core` is a submodule (flaitron pin) — required by
+          # test_contract.py's pin-vs-vendored-SPEC guard, which reads
+          # .flaitron/core/SPEC.md directly and fails FileNotFoundError
+          # without it.
+          submodules: true
+
+      # Resolve where each stack lives: subdir (frontend/ · backend/) or root.
+      # Empty output = that stack isn't present, so its steps are skipped.
+      - name: Detect layout
+        id: layout
+        run: |
+          if   [ -f frontend/package.json ]; then echo "fe=frontend" >> "$GITHUB_OUTPUT"
+          elif [ -f package.json ];          then echo "fe=." >> "$GITHUB_OUTPUT"; fi
+          if   [ -f backend/pyproject.toml ]; then echo "be=backend" >> "$GITHUB_OUTPUT"
+          elif [ -f pyproject.toml ];         then echo "be=." >> "$GITHUB_OUTPUT"; fi
+
+      # Node — set up only when a package.json is present. Bump node-version to
+      # match this repo's .nvmrc if it pins a different line.
+      - name: Set up Node
+        if: steps.layout.outputs.fe != ''
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ${{ steps.layout.outputs.fe }}/package-lock.json
+
+      # Python + uv — set up when a pyproject.toml is present, OR when the npm
+      # stack is, because the changed-line coverage gate runs `uvx diff-cover`
+      # for every stack (diff-cover reads both Cobertura XML and lcov.info, so
+      # one tool covers Python and TypeScript alike). Bump python-version to
+      # match this repo's .python-version if it differs.
+      - name: Set up Python + uv
+        if: steps.layout.outputs.be != '' || steps.layout.outputs.fe != ''
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: '3.13'
+          enable-cache: true
+
+      # ---- Frontend gates: eslint · tsc · vitest ----
+      - name: Install (npm)
+        if: steps.layout.outputs.fe != ''
+        working-directory: ${{ steps.layout.outputs.fe }}
+        run: npm ci
+      - name: Lint (eslint)
+        if: steps.layout.outputs.fe != ''
+        working-directory: ${{ steps.layout.outputs.fe }}
+        run: npm run lint
+      - name: Typecheck (tsc)
+        if: steps.layout.outputs.fe != ''
+        working-directory: ${{ steps.layout.outputs.fe }}
+        run: npm run typecheck
+      # `--coverage` here rather than a second test run: the reporters
+      # (`text` + `lcovonly`) come from vitest.config.ts, so this flag is all
+      # CI adds. The report feeds the coverage gate below.
+      - name: Test (vitest)
+        if: steps.layout.outputs.fe != ''
+        working-directory: ${{ steps.layout.outputs.fe }}
+        run: npm test -- --coverage
+
+      # ---- Frontend e2e gate: playwright ----
+      # Last of the frontend gates so a broken unit test fails before we pay
+      # for a browser download. The spec route-mocks the API and
+      # playwright.config.ts sets `reuseExistingServer: !CI`, so Playwright
+      # boots its own Vite server here and no backend service is needed.
+      # Chromium only — the config declares exactly one project.
+      - name: Install Playwright browsers
+        if: steps.layout.outputs.fe != ''
+        working-directory: ${{ steps.layout.outputs.fe }}
+        run: npx playwright install --with-deps chromium
+      # playwright.config.ts adds the `html` reporter when CI is set (Fleet HQ
+      # NAT-186.6, NAT-370), so the report the upload below collects is
+      # written without a flag here.
+      - name: E2E (playwright)
+        if: steps.layout.outputs.fe != ''
+        working-directory: ${{ steps.layout.outputs.fe }}
+        run: npx playwright test
+      # A red gate is only worth arming if you can see why it went red.
+      - name: Upload Playwright report
+        if: failure() && steps.layout.outputs.fe != ''
+        uses: actions/upload-artifact@v6
+        with:
+          name: playwright-report
+          path: ${{ steps.layout.outputs.fe }}/playwright-report/
+          retention-days: 7
+
+      # ---- Backend gates: ruff · ruff format · pyright · pytest ----
+      # `--locked` fails the run when uv.lock is stale against pyproject.toml,
+      # instead of silently re-resolving to something the workstation never ran.
+      - name: Sync (uv)
+        if: steps.layout.outputs.be != ''
+        working-directory: ${{ steps.layout.outputs.be }}
+        run: uv sync --locked
+      - name: Lint (ruff)
+        if: steps.layout.outputs.be != ''
+        working-directory: ${{ steps.layout.outputs.be }}
+        run: uv run ruff check .
+      - name: Format check (ruff)
+        if: steps.layout.outputs.be != ''
+        working-directory: ${{ steps.layout.outputs.be }}
+        run: uv run ruff format --check .
+      # The Python half of the lint+typecheck+test contract, which until CBN-170
+      # only the npm stack satisfied. `uv run` (not `uvx`) on purpose: pyright
+      # is in the backend's dev dependency-group, so the runner and `just
+      # typecheck` resolve the same pinned checker instead of floating apart.
+      # Mode and pythonVersion come from pyproject.toml's [tool.pyright] block.
+      # Do not add mypy alongside it.
+      - name: Typecheck (pyright)
+        if: steps.layout.outputs.be != ''
+        working-directory: ${{ steps.layout.outputs.be }}
+        run: uv run pyright
+      # `--cov=.` walks the tree, so a brand-new never-imported module is
+      # reported at 0% rather than omitted — that is what lets the coverage
+      # gate below catch an entirely untested new file. `[tool.coverage.run]`
+      # in pyproject.toml supplies branch mode and the omits.
+      - name: Test (pytest)
+        if: steps.layout.outputs.be != ''
+        working-directory: ${{ steps.layout.outputs.be }}
+        run: uv run pytest --cov=. --cov-report=xml
+
+      # ---- Changed-line coverage: diff-cover (NEW/CHANGED lines only) ----
+      # Gates the lines this diff added or changed at COVERAGE_MIN%, per stack.
+      # Deliberately NOT a whole-project percentage: Fleet HQ's
+      # docs/QUALITY-STACK.md rejected the global floor 2-1 ("rewards gaming
+      # and punishes old debt"). This form draws no line against a fleet-wide
+      # number — it is the same class of per-repo pass/fail gate as
+      # `eslint --max-warnings 0`.
+      #
+      # One diff-cover run PER STACK, not one combined run: the tool refuses to
+      # mix report formats ("Mixing LCov and XML reports is not supported yet"),
+      # and per-stack scoping is better anyway — a Python-only diff is not
+      # diluted by frontend coverage. `just coverage` reproduces both locally.
+      - name: Resolve coverage diff base
+        id: covbase
+        if: steps.layout.outputs.be != '' || steps.layout.outputs.fe != ''
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.base_ref }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          # Both triggers are handled on purpose. A PR-only coverage gate is the
+          # textbook deployment, but this fleet commits directly to `main`
+          # (~/Code/CLAUDE.md), so PR-only would ship a gate that never runs.
+          # On a push, `github.event.before` is the previous head. Values come
+          # in as env vars, never interpolated into the script body, so a
+          # branch name cannot inject shell.
+          base=""
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            base="origin/$PR_BASE"
+          elif [ -n "${PUSH_BEFORE:-}" ] \
+            && [ "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ] \
+            && git cat-file -e "${PUSH_BEFORE}^{commit}" 2>/dev/null; then
+            base="$PUSH_BEFORE"
+          fi
+          if [ -z "$base" ]; then
+            # First push to a new branch, a force-push, or a squashed history:
+            # there is no honest base to diff against. Skip loudly rather than
+            # comparing against something wrong.
+            echo "::notice::No usable diff base — changed-line coverage gate skipped for this run."
+          else
+            echo "Coverage diff base: $base"
+          fi
+          echo "ref=$base" >> "$GITHUB_OUTPUT"
+
+      - name: Coverage (changed lines, frontend)
+        if: steps.layout.outputs.fe != '' && steps.covbase.outputs.ref != ''
+        env:
+          DIR: ${{ steps.layout.outputs.fe }}
+          BASE: ${{ steps.covbase.outputs.ref }}
+        run: |
+          set -euo pipefail
+          # lcov `SF:` records are relative to the vitest root — i.e. the stack
+          # dir — while `git diff` emits repo-root-relative paths. diff-cover's
+          # --src-roots does NOT remap lcov (it applies to Cobertura only), so
+          # the prefix is rewritten here. Skipping this does not error: the gate
+          # reports "No lines with coverage information in this diff" and passes
+          # everything, which reads exactly like a well-covered diff (NAT-229).
+          if [ "$DIR" != "." ]; then
+            sed -i "s|^SF:|SF:$DIR/|" "$DIR/coverage/lcov.info"
+          fi
+          uvx "diff-cover@${DIFF_COVER_VERSION}" "$DIR/coverage/lcov.info" \
+            --compare-branch="$BASE" --fail-under="$COVERAGE_MIN" --show-uncovered
+
+      # No path rewrite on this one: Cobertura carries an absolute <source>
+      # element, which diff-cover resolves against the repo root by itself.
+      - name: Coverage (changed lines, backend)
+        if: steps.layout.outputs.be != '' && steps.covbase.outputs.ref != ''
+        env:
+          DIR: ${{ steps.layout.outputs.be }}
+          BASE: ${{ steps.covbase.outputs.ref }}
+        run: |
+          set -euo pipefail
+          uvx "diff-cover@${DIFF_COVER_VERSION}" "$DIR/coverage.xml" \
+            --compare-branch="$BASE" --fail-under="$COVERAGE_MIN" --show-uncovered
+
+      # ---- Secret scan: gitleaks (spine — runs in every repo, any stack) ----
+      # Stack-agnostic, so it carries no layout guard. Scans the checked-out
+      # working tree against the Fleet HQ baseline config deposited alongside
+      # this workflow. The pre-commit hook stops secrets before they enter
+      # history; this is the backstop for commits made without it installed.
+      # Pin GITLEAKS_VERSION deliberately — an unpinned scanner changes its own
+      # findings between runs.
+      - name: Secret scan (gitleaks)
+        env:
+          GITLEAKS_VERSION: '8.30.1'
+        run: |
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" dir . --config .gitleaks.toml --no-banner --redact

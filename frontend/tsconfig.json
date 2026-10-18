@@ -1,0 +1,15 @@
+{
+  /* Solution root — it type-checks nothing itself, it just names the two real
+     projects. This is upstream Vite's layout, and it is what makes
+     typescript-eslint's `projectService` work (see eslint.config.js): the
+     service opens the nearest tsconfig.json and follows its `references` to
+     find which project owns a given file. A flat two-config layout leaves
+     everything in tsconfig.node.json undiscoverable (Fleet HQ NAT-222).
+
+     `tsc -b` builds both; there is no argument list to keep in sync. */
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.app.json" },
+    { "path": "./tsconfig.node.json" }
+  ]
+}

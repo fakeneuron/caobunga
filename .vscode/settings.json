@@ -1,0 +1,9 @@
+{
+  "editor.formatOnSave": true,
+  "editor.insertSpaces": true,
+  "editor.tabSize": 2,
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true,
+  "terminal.integrated.tabs.nestingBehavior": "hide",
+  "terminal.integrated.enablePersistentSessions": true
+}

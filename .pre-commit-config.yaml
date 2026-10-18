@@ -1,0 +1,33 @@
+# pre-commit (Fleet HQ Tier-1 deposit) — secret scanning ONLY.
+#
+# Deliberately a single hook. NAT-060 evaluated the pre-commit framework and
+# returned a NO for lint/format: that surface is already 100% covered by the
+# flaitron Phase 3 checklist (and /ft-quality at the time — retired upstream
+# v5.15.0), so duplicating it here would add
+# a friction cycle with no enforcement benefit in a solo agent-driven workflow.
+# That finding stands. NAT-060's own carve-out is why this file exists at all:
+# "Only genuine gap: secret scanning — not covered by the agent workflow today
+# … a targeted standalone hook is a separate decision if the operator wants it."
+# NAT-117 is that decision. Do NOT add ruff/eslint/prettier hooks here without
+# re-litigating NAT-060 — a repo that wants them adds them locally.
+#
+# `gitleaks protect --staged` scans only what is about to be committed, which is
+# the one thing CI and the fleet audit cannot do: stop the secret before it
+# enters history. The other two instruments scan after the fact.
+#
+# Prerequisites (neither is installed by this file):
+#   uv tool install pre-commit     # the runner — go-forward per ~/.claude/CLAUDE.md
+#   brew install gitleaks          # the scanner
+#   pre-commit install             # per repo, writes .git/hooks/pre-commit
+# Until `pre-commit install` runs in the repo, this config is inert.
+#
+# Base-stable: refreshable via Fleet HQ's layer-refresh skill.
+
+repos:
+  - repo: local
+    hooks:
+      - id: gitleaks
+        name: gitleaks (secret scan, staged only)
+        language: system
+        entry: gitleaks protect --config .gitleaks.toml --staged --redact --no-banner
+        pass_filenames: false

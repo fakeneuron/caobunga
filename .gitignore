@@ -1,0 +1,55 @@
+# Secrets — .env* catches .env, .env.local, .env.bak, etc.; keep .env.example for docs
+.env*
+!.env.example
+
+# Build artifacts & caches
+node_modules/
+dist/
+build/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+*.egg-info/
+.venv/
+
+# Test & coverage output
+coverage.xml
+coverage/
+htmlcov/
+.coverage
+playwright-report*/
+test-results/
+.playwright-mcp/
+.flaitron/screenshots/
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.hypothesis/
+.tox/
+.nox/
+.eslintcache
+*.tsbuildinfo
+
+# SQLite
+*.db-shm
+*.db-wal
+
+# Logs
+*.log
+
+# Editor settings — .vscode/ is tracked as SSOT (project-level defaults are
+# seeded from Fleet HQ's configs/.vscode/; personal prefs live in VS Code user
+# settings, not workspace). No ignore entry by design.
+
+# OS / editor noise
+.DS_Store
+*.suo
+*.sw?
+
+# Personal scratch
+SCRATCHPAD.md
+
+# Claude Code runtime
+.claude/scheduled_tasks.lock

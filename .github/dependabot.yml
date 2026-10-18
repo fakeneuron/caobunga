@@ -1,0 +1,35 @@
+# Fleet-wide Dependabot config (Fleet HQ NAT-230, adopted here at CBN-170):
+# security-update PRs on, weekly version-update PRs off. Keeps the CVE signal
+# without the 2-4h/month review bill a full version-update rollout would cost
+# across ~20 repos. See Fleet HQ's docs/STACK-TENDENCIES.md §"Dependency updates".
+#
+# IMPORTANT: this file does not by itself enable Dependabot security updates.
+# That is a one-time per-repo GitHub setting (Settings > Code security >
+# "Dependabot security updates"), independent of this file. `dependabot.yml`
+# only configures *version* updates; `open-pull-requests-limit: 0` below
+# suppresses version-update PRs while leaving security-update PRs (once the
+# repo setting is on) unaffected. Inert until armed, like the gitleaks hook.
+#
+# Spine-standardized, not byte-uniform: the three blocks below are this repo's
+# reviewed per-repo edit of the deposit — `frontend/` (npm) + `backend/` (uv)
+# subdir layout. Fleet HQ's layer-refresh skill never byte-copies this file.
+version: 2
+
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
+
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
+
+  - package-ecosystem: "uv"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
