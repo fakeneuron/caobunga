@@ -1,4 +1,5 @@
-import type { NewRow, RunCounts, RunRecord } from '../api/types'
+import { Fragment, useState } from 'react'
+import type { ForeignCommit, NewRow, RunCounts, RunRecord, SuiteVerb } from '../api/types'
 import { OUTCOMES } from '../api/types'
 import { formatSeconds } from '../lib/duration'
 import { MetaRow, OptionalText, OutcomeBadge } from './display'
@@ -48,10 +49,15 @@ function tally(runs: RunRecord[]): RunCounts {
 /** Full run record as a `<dl>` — the Last run panel's view. */
 export function RunRecordDetail({ run }: { run: RunRecord | null }) {
   if (!run) {
-    return <p className="text-sm text-slate-400">No run record yet.</p>
+    return <p className="text-sm text-slate-500">No run record yet.</p>
   }
 
-  const entries: [string, string | null | undefined][] = [
+  // The legacy Hermes rows ride on `hermes_review`: a post-CBN-258 record never
+  // carries it, and four dash rows on every new run would read as a review that
+  // did not happen. The CBN-439 rows are omitted when absent on the same
+  // reasoning; the core rows keep the dash idiom.
+  const hermes = Boolean(run.hermes_review)
+  const entries: [string, string | null | undefined, boolean?][] = [
     ['Task', run.task_id],
     ['Outcome', run.outcome],
     ['Closed', run.closed_at],
@@ -59,28 +65,50 @@ export function RunRecordDetail({ run }: { run: RunRecord | null }) {
     ['Duration', formatDuration(run)],
     ['Escalation', run.escalation_reason ?? null],
     ['Park reason', run.park_reason ?? null],
-    ['Hermes review', run.hermes_review ?? null],
-    ['Hermes verdict code', run.hermes_verdict_code ?? null],
-    ['Hermes verdict', run.hermes_verdict ?? null],
-    ['Hermes missing servers', run.hermes_missing_servers?.join(', ') ?? null],
+    ['Eligibility', run.eligibility_reason ?? null, Boolean(run.eligibility_reason)],
+    ['Hermes review', run.hermes_review ?? null, hermes],
+    ['Hermes verdict code', run.hermes_verdict_code ?? null, hermes],
+    ['Hermes verdict', run.hermes_verdict ?? null, hermes],
+    ['Hermes missing servers', run.hermes_missing_servers?.join(', ') ?? null, hermes],
     ['Suite verdict', run.suite?.verdict ?? null],
+    ['External review', run.external_review ?? null, Boolean(run.external_review)],
     ['Summary', run.summary],
     ['Commit', run.commit_sha ?? null],
     ['Provider', run.provider ?? null],
+    [
+      'Exhausted providers',
+      run.exhausted_providers?.join(', ') ?? null,
+      Boolean(run.exhausted_providers?.length),
+    ],
     ['Model', run.model ?? null],
     ['Plan model', run.plan_model ?? null],
     ['Invocation', run.invocation_id ?? null],
     ['Next task', run.next_task ?? null],
     ['Tasknote', run.tasknote_path ?? null],
+    ['Log', run.log_path ?? null, Boolean(run.log_path)],
   ]
 
   return (
     <dl>
-      {entries.map(([label, value]) => (
-        <MetaRow key={label} label={label}>
-          <OptionalText value={value ?? null} />
+      {entries
+        .filter(([, , show = true]) => show)
+        .map(([label, value]) => (
+          <Fragment key={label}>
+            <MetaRow label={label}>
+              <OptionalText value={value ?? null} />
+            </MetaRow>
+            {label === 'Suite verdict' && run.suite && run.suite.verbs.length > 0 && (
+              <MetaRow label="Suite verbs">
+                <SuiteVerbTable verbs={run.suite.verbs} />
+              </MetaRow>
+            )}
+          </Fragment>
+        ))}
+      {run.foreign_commits && run.foreign_commits.length > 0 && (
+        <MetaRow label="Foreign commits">
+          <ForeignCommitList commits={run.foreign_commits} />
         </MetaRow>
-      ))}
+      )}
       {run.follow_ups && (
         <MetaRow label="Follow-ups">
           <FollowUpList items={run.follow_ups} />
@@ -147,9 +175,66 @@ function NewRowList({ rows }: { rows: NewRow[] }) {
   )
 }
 
+/** A verb that did not pass: a nonzero exit, a timeout, or a refusal. */
+function verbFailed(verb: SuiteVerb): boolean {
+  return verb.timed_out || Boolean(verb.refused) || (verb.exit_code ?? 0) !== 0
+}
+
+/** One verb's result cell. `exit_code` is absent exactly when timed out or refused. */
+function verbResult(verb: SuiteVerb): string {
+  if (verb.timed_out) return 'timed out'
+  if (verb.refused) return `refused: ${verb.refused}`
+  return `exit ${verb.exit_code ?? '—'}`
+}
+
+/**
+ * The suite's per-verb results (CBN-439). The verdict row above folds these to
+ * one word; this is the "which verb, and how" the CLI snapshot already prints.
+ * Durations are float seconds, rounded to the shared second-precision idiom.
+ */
+function SuiteVerbTable({ verbs }: { verbs: SuiteVerb[] }) {
+  return (
+    <table className="text-xs">
+      <tbody>
+        {verbs.map((verb) => (
+          <tr key={verb.verb} className={verbFailed(verb) ? 'text-rose-700' : 'text-slate-700'}>
+            <td className="pr-3 font-mono">{verb.verb}</td>
+            <td className="pr-3">{verbResult(verb)}</td>
+            <td className="pr-3">{formatSeconds(Math.round(verb.duration))}</td>
+            <td>{verb.detail ?? ''}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
+/**
+ * Commits that landed in the run's window that it does not account for
+ * (CBN-172). SHA, author and subject only — the record's fields, never a diff
+ * or a log (docs/CONTRACT.md §"Report-surface deny-list").
+ */
+function ForeignCommitList({ commits }: { commits: ForeignCommit[] }) {
+  return (
+    <ul className="space-y-1">
+      {commits.map((commit) => (
+        <li key={commit.sha} className="text-slate-700">
+          <span className="font-mono text-xs text-slate-800">{commit.sha.slice(0, 7)}</span>{' '}
+          {commit.author} — {commit.subject}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
 /** Compact history row — the signals an operator needs to judge a run at a glance. */
 function RunHistoryRow({ run }: { run: RunRecord }) {
   const duration = formatDuration(run)
+  const [expanded, setExpanded] = useState(false)
+  const failedVerbs =
+    run.suite && run.suite.verdict !== 'green'
+      ? run.suite.verbs.filter(verbFailed).map((verb) => verb.verb)
+      : []
   return (
     <li className="border-b border-slate-100 py-2 text-sm last:border-b-0">
       <div className="flex flex-wrap items-center gap-2">
@@ -160,7 +245,7 @@ function RunHistoryRow({ run }: { run: RunRecord }) {
         {run.hermes_review && (
           <span
             className={
-              run.hermes_review === 'degraded' ? 'text-xs text-amber-700' : 'text-xs text-slate-400'
+              run.hermes_review === 'degraded' ? 'text-xs text-amber-700' : 'text-xs text-slate-500'
             }
           >
             review: {run.hermes_review}
@@ -170,11 +255,16 @@ function RunHistoryRow({ run }: { run: RunRecord }) {
         {run.suite && (
           <span
             className={
-              run.suite.verdict === 'green' ? 'text-xs text-slate-400' : 'text-xs text-rose-700'
+              run.suite.verdict === 'green' ? 'text-xs text-slate-500' : 'text-xs text-rose-700'
             }
           >
             suite: {run.suite.verdict}
+            {failedVerbs.length > 0 && ` (${failedVerbs.join(', ')})`}
           </span>
+        )}
+        {/* Only `missing` is a signal — the digest tags it alone (§"External review"). */}
+        {run.external_review === 'missing' && (
+          <span className="text-xs text-amber-700">review: missing</span>
         )}
         {run.escalation_reason && (
           <span className="font-mono text-xs text-rose-700">{run.escalation_reason}</span>
@@ -183,10 +273,16 @@ function RunHistoryRow({ run }: { run: RunRecord }) {
           <span className="font-mono text-xs text-amber-700">park: {run.park_reason}</span>
         )}
       </div>
-      {/* Summaries run to 500 chars; clamp so twelve rows stay scannable. */}
-      <p className="mt-1 line-clamp-2 text-slate-600" title={run.summary}>
+      {/* Summaries run to 500 chars; clamp so twelve rows stay scannable, and
+          expand in place on click rather than behind a hover-only `title`. */}
+      <button
+        type="button"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((open) => !open)}
+        className={`mt-1 w-full cursor-pointer text-left text-slate-600 ${expanded ? '' : 'line-clamp-2'}`}
+      >
         {run.summary}
-      </p>
+      </button>
     </li>
   )
 }
@@ -236,7 +332,7 @@ export function RunHistory({ runs, counts }: { runs: RunRecord[]; counts: RunCou
         ))}
       </div>
       {runs.length === 0 ? (
-        <p className="pb-2 text-sm text-slate-400">No runs recorded yet.</p>
+        <p className="pb-2 text-sm text-slate-500">No runs recorded yet.</p>
       ) : (
         byInvocation(runs).map((group) => (
           <InvocationGroup key={group.id ?? 'ungrouped'} id={group.id} runs={group.runs} />

@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"
 
 
 def install_provenance() -> tuple[str, Path]:

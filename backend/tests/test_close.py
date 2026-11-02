@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from test_loop import (
+from conftest import (
     CLOSED_PLAN,
     OPEN_PLAN,
     _amend,
@@ -217,6 +217,62 @@ def test_closed_summary_folds_post_commit_tree_residue(tmp_path: Path) -> None:
     assert "tree: 1 file(s) left (" in snap.summary
     assert "stray.txt" in snap.summary
     assert "no open tasknote" in snap.summary
+
+
+def test_closed_summary_splits_dirt_outside_the_worker_footprint(tmp_path: Path) -> None:
+    """CBN-452: NAT-510's record blamed its worker for a concurrent session's
+    `docs/PORT-REGISTRY.md`. Footprint = run-commit paths, the note's `touches:`,
+    and `.flaitron/`; anything else gets its own clause.
+    """
+    repo = _git_repo(tmp_path, OPEN_PLAN)
+    sha = git_head(repo)
+    assert sha is not None
+    (repo / ".flaitron" / "PLAN.md").write_text(CLOSED_PLAN, encoding="utf-8")
+    _archive_note(repo, "CBN-011")
+    note = repo / ".flaitron" / "tasknote" / "archive" / "cbn" / "CBN-011.md"
+    text = note.read_text(encoding="utf-8")
+    note.write_text(text.replace("---\n\n", "touches:\n  - src/\n---\n\n", 1), encoding="utf-8")
+    (repo / "committed.txt").write_text("one\n", encoding="utf-8")
+    _commit(repo, "close CBN-011")
+    (repo / "committed.txt").write_text("two\n", encoding="utf-8")
+    (repo / "src").mkdir()
+    (repo / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
+    (repo / ".flaitron" / "PLAN-ARCHIVE.md").write_text("rotated\n", encoding="utf-8")
+    (repo / "docs").mkdir()
+    (repo / "docs" / "PORT-REGISTRY.md").write_text("foreign\n", encoding="utf-8")
+    snap = inspect_close(repo, "CBN-011", sha)
+    assert snap is not None
+    _, _, line = snap.summary.rpartition(" — ")
+    assert line == (
+        "tree: 4 file(s) left (1 outside worker footprint: ?? docs/PORT-REGISTRY.md;"
+        " M committed.txt; ?? .flaitron/PLAN-ARCHIVE.md; ?? src/app.py; no open tasknote)"
+    )
+
+
+def test_tree_after_without_since_keeps_the_unsplit_line(tmp_path: Path) -> None:
+    repo = _git_repo(tmp_path, OPEN_PLAN)
+    (repo / "stray.txt").write_text("x\n", encoding="utf-8")
+    assert tree_after(repo, "CBN-011") == "tree: 1 file(s) left (?? stray.txt; no open tasknote)"
+
+
+def test_tree_after_with_unreadable_since_keeps_the_unsplit_line(tmp_path: Path) -> None:
+    repo = _git_repo(tmp_path, OPEN_PLAN)
+    (repo / "stray.txt").write_text("x\n", encoding="utf-8")
+    line = tree_after(repo, "CBN-011", since="0" * 40)
+    assert line == "tree: 1 file(s) left (?? stray.txt; no open tasknote)"
+
+
+def test_tree_after_reads_touches_from_the_open_note(tmp_path: Path) -> None:
+    note = "---\nstatus: in-progress\ntouches:\n  - lib/*.py\n---\n"
+    repo = _git_repo(tmp_path, OPEN_PLAN, notes={"CBN-011": note})
+    sha = git_head(repo)
+    assert sha is not None
+    (repo / "lib").mkdir()
+    (repo / "lib" / "a.py").write_text("x\n", encoding="utf-8")
+    (repo / "other.md").write_text("x\n", encoding="utf-8")
+    assert tree_after(repo, "CBN-011", since=sha) == (
+        "tree: 2 file(s) left (1 outside worker footprint: ?? other.md; ?? lib/a.py; tasknote open)"
+    )
 
 
 def test_tree_after_reports_clean_tree_with_open_tasknote(tmp_path: Path) -> None:
@@ -526,6 +582,35 @@ def test_reinspect_settled_leaves_a_non_closure_alone(tmp_path: Path) -> None:
     repo, start, snap = _settled_close(tmp_path)
     parked = snap.model_copy(update={"outcome": Outcome.BLOCKED})
     assert reinspect_settled(repo, "CBN-011", start, parked) is parked
+
+
+def test_reinspect_settled_attributes_a_late_park_commit(tmp_path: Path) -> None:
+    """CBN-443. The park was detected uncommitted; the final pass names its commit."""
+    repo = _git_repo(tmp_path, OPEN_PLAN)
+    start = git_head(repo)
+    assert start is not None
+    (repo / ".flaitron" / "tasknote" / "CBN-011.md").write_text(
+        _note("blocked", "drift — premise"), encoding="utf-8"
+    )
+    snap = inspect_close(repo, "CBN-011", start)
+    assert snap is not None
+    assert snap.commit_sha is None
+    snap = snap.model_copy(update={"log_path": "/logs/run.log"})
+    _commit(repo, "chore: park CBN-011 — drift")
+
+    assert reinspect_settled(repo, "CBN-011", start, snap) is snap
+    fresh = reinspect_settled(repo, "CBN-011", start, snap, on_branch=True)
+    assert fresh.outcome is Outcome.BLOCKED
+    assert fresh.commit_sha == git_head(repo)
+    assert not fresh.foreign_commits
+    assert fresh.log_path == "/logs/run.log"
+
+
+def test_reinspect_settled_keeps_a_park_the_reread_lost(tmp_path: Path) -> None:
+    """CBN-443. A final read that no longer sees a park keeps the first snapshot."""
+    repo, start, snap = _settled_close(tmp_path)
+    parked = snap.model_copy(update={"outcome": Outcome.BLOCKED})
+    assert reinspect_settled(repo, "CBN-011", start, parked, on_branch=True) is parked
 
 
 def test_reinspect_settled_keeps_the_close_when_git_cannot_say(
@@ -1467,3 +1552,94 @@ def test_inspect_close_attributes_the_final_flip_after_a_reopen(tmp_path: Path) 
     snap = inspect_close(repo, "CBN-011", start)
     assert snap is not None
     assert snap.commit_sha == close
+
+
+def test_tree_after_puts_a_concurrent_sessions_tasknote_outside(tmp_path: Path) -> None:
+    """CBN-452 review: `.flaitron/` is not blanket-owned — another session's note lands there."""
+    repo = _git_repo(tmp_path, OPEN_PLAN, notes={"CBN-011": "---\nstatus: in-progress\n---\n"})
+    sha = git_head(repo)
+    assert sha is not None
+    (repo / ".flaitron" / "tasknote" / "CBN-011.md").write_text("edited\n", encoding="utf-8")
+    (repo / ".flaitron" / "tasknote" / "NAT-600.md").write_text("theirs\n", encoding="utf-8")
+    assert tree_after(repo, "CBN-011", since=sha) == (
+        "tree: 2 file(s) left (1 outside worker footprint: ?? .flaitron/tasknote/NAT-600.md;"
+        " M .flaitron/tasknote/CBN-011.md; tasknote open)"
+    )
+
+
+def test_tree_after_matches_a_c_quoted_non_ascii_path(tmp_path: Path) -> None:
+    """CBN-452 review: porcelain C-quotes `café.md`; `changed_paths` (`-z`) does not."""
+    repo = _git_repo(tmp_path, OPEN_PLAN)
+    sha = git_head(repo)
+    assert sha is not None
+    (repo / "café.md").write_text("one\n", encoding="utf-8")
+    _commit(repo, "add")
+    (repo / "café.md").write_text("two\n", encoding="utf-8")
+    line = tree_after(repo, "CBN-011", since=sha)
+    assert "outside worker footprint" not in line
+
+
+def test_tree_after_keeps_a_foreign_commits_paths_out_of_the_footprint(tmp_path: Path) -> None:
+    """CBN-457: a foreign window commit must not widen the footprint, or its later
+    re-edit reads as the worker's. A path a worker commit also touched stays in.
+    """
+    repo = _git_repo(tmp_path, OPEN_PLAN)
+    sha = git_head(repo)
+    assert sha is not None
+    (repo / "mine.txt").write_text("1\n", encoding="utf-8")
+    (repo / "shared.txt").write_text("1\n", encoding="utf-8")
+    _commit(repo, "worker")
+    (repo / "theirs.txt").write_text("1\n", encoding="utf-8")
+    (repo / "shared.txt").write_text("2\n", encoding="utf-8")
+    _commit(repo, "foreign")
+    foreign = git_head(repo)
+    assert foreign is not None
+    for name in ("mine.txt", "shared.txt", "theirs.txt"):
+        (repo / name).write_text("dirty\n", encoding="utf-8")
+    assert tree_after(repo, "CBN-011", since=sha, foreign=[foreign]) == (
+        "tree: 3 file(s) left (1 outside worker footprint: M theirs.txt;"
+        " M mine.txt; M shared.txt; no open tasknote)"
+    )
+    assert "outside worker footprint" not in tree_after(repo, "CBN-011", since=sha)
+
+
+def test_tree_after_with_unreadable_window_keeps_the_unsplit_line_for_foreign(
+    tmp_path: Path,
+) -> None:
+    repo = _git_repo(tmp_path, OPEN_PLAN)
+    (repo / "stray.txt").write_text("x\n", encoding="utf-8")
+    line = tree_after(repo, "CBN-011", since="0" * 40, foreign=["a" * 40])
+    assert line == "tree: 1 file(s) left (?? stray.txt; no open tasknote)"
+
+
+@pytest.mark.parametrize(
+    ("touch", "dirt"),
+    [
+        ("**/app.py", "app.py"),
+        ("src/**/app.py", "src/app.py"),
+        ("src/**/app.py", "src/pkg/app.py"),
+        ("./lib/*.py", "lib/a.py"),
+    ],
+)
+def test_tree_after_matches_globstar_and_dot_slash_touches(
+    tmp_path: Path, touch: str, dirt: str
+) -> None:
+    """CBN-457: `fnmatchcase` has no globstar and no `./` — normalized before matching."""
+    note = f"---\nstatus: in-progress\ntouches:\n  - '{touch}'\n---\n"
+    repo = _git_repo(tmp_path, OPEN_PLAN, notes={"CBN-011": note})
+    sha = git_head(repo)
+    assert sha is not None
+    target = repo / dirt
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("x\n", encoding="utf-8")
+    assert "outside worker footprint" not in tree_after(repo, "CBN-011", since=sha)
+
+
+def test_tree_after_does_not_strip_a_mid_token_globstar(tmp_path: Path) -> None:
+    """CBN-457 review: `foo**/bar.py` must not also match `foobar.py`."""
+    note = "---\nstatus: in-progress\ntouches:\n  - 'foo**/bar.py'\n---\n"
+    repo = _git_repo(tmp_path, OPEN_PLAN, notes={"CBN-011": note})
+    sha = git_head(repo)
+    assert sha is not None
+    (repo / "foobar.py").write_text("x\n", encoding="utf-8")
+    assert "1 outside worker footprint: ?? foobar.py" in tree_after(repo, "CBN-011", since=sha)

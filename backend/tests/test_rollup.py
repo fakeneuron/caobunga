@@ -5,8 +5,17 @@ from pathlib import Path
 
 from test_store import green_suite
 
+from caobunga.digest import run_bullet
 from caobunga.flaitron import PLAN_REL
-from caobunga.models import Outcome, RegistryRecord, RunRecord
+from caobunga.models import (
+    ExternalReview,
+    HermesVerdictCode,
+    Outcome,
+    RegistryRecord,
+    RunRecord,
+    Suite,
+    SuiteVerb,
+)
 from caobunga.report import report
 from caobunga.rollup import (
     cohort_complete,
@@ -108,6 +117,134 @@ def test_format_rollup_uses_run_summaries_only() -> None:
     assert "**CBN-010** (`closed`) — Registry landed." in body
     assert "**CBN-014** (`closed`) — CLI dumps YAML." in body
     assert "Phase 1" not in body
+
+
+def test_format_rollup_bullet_carries_the_digest_tags() -> None:
+    """CBN-402. A red / unreviewed / parked run reads the same in rollup and digest."""
+    cohorts = parse_epic_cohorts(PLAN_EPIC1_DONE)
+    red_suite = Suite.from_verbs(
+        [
+            SuiteVerb(verb="test", exit_code=1, duration=1.0),
+            SuiteVerb(verb="lint", exit_code=0, duration=0.1),
+            SuiteVerb(verb="typecheck", exit_code=0, duration=0.2),
+        ]
+    )
+    run = _run("CBN-010", "Registry landed.").model_copy(
+        update={
+            "suite": red_suite,
+            "external_review": ExternalReview.MISSING,
+            "park_reason": "visual-confirm",
+            "hermes_verdict_code": HermesVerdictCode.REJECT,
+        }
+    )
+    body = format_rollup("app", cohorts[0], [run])
+    expected = (
+        "- **CBN-010** (`closed`) [reject] [suite: red] [review: missing]"
+        " (park: visual-confirm)"
+        " — Registry landed."
+    )
+    assert run_bullet(run) == expected
+    assert expected in body.splitlines()
+
+
+def test_range_outside_an_html_comment_is_not_a_cohort() -> None:
+    """CBN-402. CONTRACT reads ranges from PLAN comments only, not task-row prose."""
+    plan = PLAN_EPIC1_DONE.replace(
+        "<!-- Epic 1 — Mechanical plow — CBN-010–014 landed -->",  # noqa: RUF001
+        "- [ ] **CBN-099** [light] | note — follows CBN-010–014.",  # noqa: RUF001
+    )
+    assert parse_epic_cohorts(plan) == []
+
+
+def test_range_in_a_fenced_comment_is_not_a_cohort() -> None:
+    """CBN-402. A fenced `<!-- … -->` is an example, not a declaration."""
+    plan = PLAN_EPIC1_DONE.replace(
+        "<!-- Epic 1 — Mechanical plow — CBN-010–014 landed -->",  # noqa: RUF001
+        "```markdown\n<!-- Epic 1 — Mechanical plow — CBN-010–014 landed -->\n```",  # noqa: RUF001
+    )
+    assert parse_epic_cohorts(plan) == []
+
+
+def test_fence_line_inside_a_comment_opens_no_fence() -> None:
+    """CBN-402 review. Comments mask before fences, as in the reader's PLAN walk."""
+    plan = PLAN_EPIC1_DONE.replace(
+        "<!-- Epic 1",
+        "<!-- commented-out example\n```\n-->\n\n<!-- Epic 1",
+    )
+    cohorts = parse_epic_cohorts(plan)
+    assert [cohort.key for cohort in cohorts] == ["CBN-010-014"]
+    assert cohorts[0].title == "Epic 1"
+
+
+def test_line_separators_in_prose_do_not_shift_the_fence_mask() -> None:
+    """CBN-402 review. `splitlines` breaks on more than `\\n`; offsets must agree.
+
+    Two extra breaks above a fence would land a `\\n`-counted index on the fenced
+    `x` line two above the comment, dropping a live declaration.
+    """
+    plan = PLAN_EPIC1_DONE.replace("# plan\n", "# plan\nprose\u2028more\fend\n").replace(
+        "<!-- Epic 1", "```\nx\n```\n<!-- Epic 1"
+    )
+    assert [cohort.key for cohort in parse_epic_cohorts(plan)] == ["CBN-010-014"]
+
+
+def test_multi_line_comment_title_is_its_first_line() -> None:
+    """CBN-402 review. A comment body is not the title; its lede line is."""
+    plan = PLAN_EPIC1_DONE.replace(
+        "<!-- Epic 1 — Mechanical plow — CBN-010–014 landed -->",  # noqa: RUF001
+        "<!--\nEpic 1: CBN-010–014 landed\nsee notes\n-->",  # noqa: RUF001
+    )
+    assert parse_epic_cohorts(plan)[0].title == "Epic 1: CBN-010–014 landed"  # noqa: RUF001
+
+
+def test_epic_id_range_is_not_read_as_area_epic() -> None:
+    """CBN-402. The start is a whole grammar id; `CBN-EPIC-16–18` is no `EPIC-16-18`."""  # noqa: RUF002
+    plan = PLAN_EPIC1_DONE.replace("CBN-010–014", "CBN-EPIC-16–18")  # noqa: RUF001
+    assert parse_epic_cohorts(plan) == []
+
+
+def test_spaced_hyphen_is_a_title_separator_not_a_range() -> None:
+    """CBN-408. `CBN-050 - 2026` would otherwise mint a 1,977-id cohort."""
+    plan = PLAN_EPIC1_DONE.replace(
+        "<!-- Epic 1", "<!-- Rollout note CBN-050 - 2026 rollout -->\n\n<!-- Epic 1"
+    )
+    assert [cohort.key for cohort in parse_epic_cohorts(plan)] == ["CBN-010-014"]
+
+
+def test_unspaced_hyphen_and_spaced_en_dash_still_declare_ranges() -> None:
+    """CBN-408. Only the spaced hyphen lost its range reading."""
+    for spelling in ("CBN-010-014", "CBN-010 – 014", "CBN-010–014"):  # noqa: RUF001
+        plan = PLAN_EPIC1_DONE.replace("CBN-010–014", spelling)  # noqa: RUF001
+        assert [cohort.key for cohort in parse_epic_cohorts(plan)] == ["CBN-010-014"], spelling
+
+
+def test_title_splits_on_a_spaced_en_dash_but_not_inside_a_range() -> None:
+    """CBN-408. A spaced `–` separates the title; a range's own dash never does."""  # noqa: RUF002
+    plan = PLAN_EPIC1_DONE.replace(
+        "<!-- Epic 1 — Mechanical plow — CBN-010–014 landed -->",  # noqa: RUF001
+        "<!-- Epic 1 – CBN-010–014 landed -->",  # noqa: RUF001
+    )
+    assert parse_epic_cohorts(plan)[0].title == "Epic 1"
+    plan = PLAN_EPIC1_DONE.replace(
+        "<!-- Epic 1 — Mechanical plow — CBN-010–014 landed -->",  # noqa: RUF001
+        "<!-- CBN-010 – 014 plow landed -->",  # noqa: RUF001
+    )
+    assert parse_epic_cohorts(plan)[0].title == "CBN-010 – 014 plow landed"  # noqa: RUF001
+    plan = PLAN_EPIC1_DONE.replace(
+        "<!-- Epic 1 — Mechanical plow — CBN-010–014 landed -->",  # noqa: RUF001
+        "<!-- Epic 1 –CBN-010–014 landed -->",  # noqa: RUF001
+    )
+    assert parse_epic_cohorts(plan)[0].title == "Epic 1 –CBN-010–014 landed"  # noqa: RUF001
+
+
+def test_unclosed_comment_in_a_fence_does_not_swallow_the_next_one() -> None:
+    """CBN-408. A fenced `<!--` opens no comment, so the live one after stays a cohort."""
+    plan = PLAN_EPIC1_DONE.replace(
+        "<!-- Epic 1", "```markdown\n<!-- unclosed example\n```\n\n<!-- Epic 1"
+    )
+    cohorts = parse_epic_cohorts(plan)
+    assert [cohort.key for cohort in cohorts] == ["CBN-010-014"]
+    assert cohorts[0].title == "Epic 1"
 
 
 def test_maybe_write_rollup_on_last_epic_close(tmp_path: Path) -> None:
@@ -227,3 +364,9 @@ def test_report_skips_the_rollup_on_a_non_utf8_plan(tmp_path: Path) -> None:
 
     assert store.last_rollup("app") is None
     assert "rollup: skipped (.flaitron/PLAN.md unreadable)" in lines
+
+
+def test_trailing_unclosed_comment_is_no_comment() -> None:
+    """CBN-408. A `<!--` with no `-->` after it opens nothing; earlier ones stand."""
+    plan = PLAN_EPIC1_DONE + "\n<!-- CBN-020–022 never closed\n"  # noqa: RUF001
+    assert [cohort.key for cohort in parse_epic_cohorts(plan)] == ["CBN-010-014"]

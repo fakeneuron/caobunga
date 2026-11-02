@@ -99,7 +99,9 @@ class Worker(Protocol):
         ...
 
     def stderr_tail(self, session: Session) -> tuple[str, ...]:
-        """Last few non-empty stderr lines, oldest first (CBN-282).
+        """Last few normalized, non-empty stderr lines, oldest first (CBN-282/410).
+
+        Normalize terminal escapes and whitespace at capture, once per line.
 
         Still a bounded fact, not a transcript: a refusal printed as multi-line
         JSON ends in a bare `}`, so the usage-limit classifier needs more than the
@@ -110,6 +112,17 @@ class Worker(Protocol):
 
     def stdout_tail(self, session: Session) -> tuple[str, ...]:
         """`stderr_tail`'s stdout counterpart. Empty when the adapter keeps no stdout."""
+        ...
+
+    def activity(self, session: Session) -> tuple[int, str | None]:
+        """Tool calls seen so far and the last `tool: <name> <target>` line (CBN-EPIC-449.3).
+
+        Read from the log-only progress trail (CBN-377), never from the stdout
+        tail, assistant text, or tool results. The target is redacted where the
+        stream is compacted (`worker_log`, CBN-458): Bash keeps its program name
+        (CBN-455), a file tool its path, any other tool its name only. `(0, None)` when the adapter
+        compacts no stream (every recipe but claude's) or no tool has run yet.
+        """
         ...
 
     def close(self) -> None:
@@ -148,9 +161,12 @@ def worker_name() -> str:
     return name
 
 
-def select_worker() -> Worker:
-    """Build the adapter CAOBUNGA_WORKER names. Imports late — the adapter imports us."""
+def select_worker(home: Path) -> Worker:
+    """Build the adapter CAOBUNGA_WORKER names, handing it the store `home`.
+
+    Imports late — the adapter imports us.
+    """
     worker_name()  # validates the token; `local` is the only value it accepts
     from caobunga.local import LocalWorker
 
-    return LocalWorker()
+    return LocalWorker(home=home)

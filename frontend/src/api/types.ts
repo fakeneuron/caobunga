@@ -21,9 +21,10 @@ export type EscalationReason =
   | "worker-error"
   | "waiting-user"
   | "worker-exited"
-  | "timeout";
+  | "timeout"
+  | "registry-changed";
 
-/** Fixed order for the escalation chip set; `escalations` always carries all seven. */
+/** Fixed order for the escalation chip set; `escalations` always carries all eight. */
 export const ESCALATIONS: readonly EscalationReason[] = [
   "note-blocked",
   "worker-parked",
@@ -32,6 +33,7 @@ export const ESCALATIONS: readonly EscalationReason[] = [
   "waiting-user",
   "worker-exited",
   "timeout",
+  "registry-changed",
 ];
 
 export type HermesReview = "reviewed" | "skipped" | "degraded";
@@ -72,7 +74,7 @@ export type Suite = {
 
 export type LastRunSummary = {
   task_id: string;
-  outcome: string;
+  outcome: Outcome;
   closed_at: string;
   summary: string;
 };
@@ -90,6 +92,36 @@ export type CurrentTask = {
  * operator's read" (CBN-157). See docs/CONTRACT.md §"Marker coverage".
  */
 export type TriageClass = "obvious" | "needs-judgment";
+
+/**
+ * Where an isolated run's branch ended up (CBN-EPIC-450.6), apart from its
+ * outcome: `unlanded` is a closure main did not get.
+ */
+export type LandingState = "landed" | "unlanded" | "retained";
+
+/** One isolated dispatch's worktree and whether it landed (CBN-EPIC-450.6). */
+export type WorktreeRun = {
+  branch: string;
+  worker_root: string;
+  execution_root: string;
+  landing_root: string;
+  base_sha: string;
+  /** `null` only on a receipt entry whose task has not finished. */
+  landing?: LandingState | null;
+  landed_sha?: string | null;
+  detail?: string | null;
+};
+
+/** A `wt-<ID>` leftover the drain skips, with its attended recovery step (CBN-EPIC-450.6). */
+export type RetainedWorktree = {
+  task_id: string;
+  branch: string;
+  path: string;
+  /** From the newest run record naming the branch; `null` when none does. */
+  landing: LandingState | null;
+  detail: string | null;
+  recovery: string;
+};
 
 /**
  * One open task an unattended pick would deny, with its `<code> — <prose>`
@@ -208,6 +240,12 @@ export type ProjectListItem = {
   providers?: string[] | null;
   registered_at?: string;
   enabled: boolean;
+  /** Argv a fresh execution worktree runs before its baseline suite (CBN-EPIC-450.3). Absent = none. */
+  bootstrap?: string[] | null;
+  /** Bootstrap ceiling in seconds. Absent = 600. */
+  bootstrap_timeout?: number | null;
+  /** Dispatch in a `wt-<ID>` worktree and land by fast-forward (CBN-EPIC-450.4). Absent = off. */
+  isolate?: boolean | null;
   last_run: LastRunSummary | null;
   current: CurrentTask | null;
   /** `null` when the registered path is missing or holds no Flaitron project. */
@@ -235,6 +273,17 @@ export type ForeignCommit = {
   subject: string;
 };
 
+/** A `running` receipt whose pid is gone, and what landed since it started (CBN-444). */
+export type StaleReceipt = {
+  receipt_id: string;
+  task_id: string | null;
+  pid: number;
+  started_at: string;
+  last_stage: string;
+  /** `<short sha> <subject>` lines; `null` when git could not say. */
+  landed: string[] | null;
+};
+
 export type RunRecord = {
   schema_version?: number;
   project: string;
@@ -251,6 +300,8 @@ export type RunRecord = {
    * §"Park reason".
    */
   park_reason?: string | null;
+  /** The `park-reason:` prose half, verbatim and unclipped (CBN-448). Display text only. */
+  park_prose?: string | null;
   /** Why the picked task was eligible for this run, `<code> — <prose>` shape. */
   eligibility_reason?: string | null;
   hermes_review?: HermesReview | null;
@@ -266,6 +317,8 @@ export type RunRecord = {
   hermes_missing_servers?: string[] | null;
   provider?: string | null;
   model?: string | null;
+  /** Reasoning-effort rung the worker launched at. Absent on records written before CBN-453. */
+  effort?: string | null;
   plan_model?: string | null;
   /** Groups every record one `caobunga run` wrote. Absent on pre-CBN-EPIC-12.7 records. */
   invocation_id?: string | null;
@@ -307,10 +360,17 @@ export type RunRecord = {
    * docs/CONTRACT.md §"Run loop" → "Usage-limit re-pick".
    */
   exhausted_providers?: string[] | null;
+  /** Isolated runs only (CBN-EPIC-450.6); absent on every other record. */
+  worktree?: WorktreeRun | null;
 };
 
 /** Tally by outcome. All five keys always present (zero when unseen). */
 export type RunCounts = Record<Outcome, number>;
+
+/** The local-day fleet digest endpoint's body (docs/CONTRACT.md §"Status API"). */
+export type DigestResponse = {
+  markdown: string;
+};
 
 export type ProjectReports = {
   last_rollup: string | null;
@@ -334,13 +394,16 @@ export type ProjectDetail = ProjectListItem & {
   runs: RunRecord[];
   run_counts: RunCounts;
   reports: ProjectReports;
+  stale_receipts: StaleReceipt[];
+  /** `[]` when none (or not isolated); `null` when git could not say. */
+  retained_worktrees: RetainedWorktree[] | null;
 };
 
 export type ProjectsResponse = {
   projects: ProjectListItem[];
 };
 
-/** Tally by escalation reason. All seven keys always present (zero when unseen). */
+/** Tally by escalation reason. All eight keys always present (zero when unseen). */
 export type EscalationCounts = Record<EscalationReason, number>;
 
 /**

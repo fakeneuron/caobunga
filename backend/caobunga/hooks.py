@@ -1,7 +1,7 @@
 """Harness hooks caobunga injects into a headless worker (CBN-212).
 
 `guard` is a Claude Code `PreToolUse` command hook. The launcher registers it
-through `--settings` on the `claude_code` recipe (`local.CLAUDE_GUARD_SETTINGS`);
+through `--settings` on the `claude_code` recipe (`recipes.CLAUDE_GUARD_SETTINGS`);
 Claude Code runs it before every `Bash` / file-writing call with the call's JSON
 on stdin, and an exit of 2 denies the call and hands stderr back to the model as
 the reason. It composes two denials:
@@ -14,9 +14,10 @@ CBN-199 stated the fact in the prompt (`prompt.FOREGROUND_ONLY`); CBN-210 broke
 it the next day. This makes the same sentence a denial rather than advice.
 
 `_registry_guard` (CBN-247) denies a `Bash` command invoking `caobunga register`
-and a Write / Edit / MultiEdit / NotebookEdit under the store home: a worker
-must not retier or re-enable a project. A tripwire against a drifting worker,
-not a sandbox — a shell write into the home through `Bash` is not screened.
+or `caobunga providers` (CBN-414) and a Write / Edit / MultiEdit / NotebookEdit
+under the store home: a worker must not retier or re-enable a project. A
+tripwire against a drifting worker, not a sandbox — a shell write into the home
+through `Bash` is not screened.
 
 Never raises. A payload it cannot read is not a denied call, so it exits 0 — a
 bug here must not wedge a worker on every tool call.
@@ -43,11 +44,11 @@ DENIAL = (
 
 REGISTRY_DENIAL = (
     "blocked by caobunga: the project registry and run records are the "
-    "operator's — do not run `caobunga register` or write under the caobunga "
-    "home; name the change you need in your final report instead."
+    "operator's — do not run `caobunga register` / `providers` or write under "
+    "the caobunga home; name the change you need in your final report instead."
 )
 
-# `caobunga register` in command position: at the start or after a shell
+# `caobunga register` / `providers` in command position: at the start or after a shell
 # separator, past any `VAR=x` assignments and a launcher (`uv run …`,
 # `python -m`), optionally path-qualified. Quoted text (`grep "caobunga
 # register"`, a commit message) and path segments (`backend/caobunga/cli.py`)
@@ -55,7 +56,7 @@ REGISTRY_DENIAL = (
 _REGISTER = re.compile(
     r"(?:^|[;&|(`\n])\s*(?:\w+=\S*\s+)*"
     r"(?:(?:uv\s+run|uvx|python3?\s+-m|exec|env|command)\s+(?:\S+\s+)*?)?"
-    r"(?:\S*/)?caobunga\s+(?:-\S+\s+)*register(?![\w-])"
+    r"(?:\S*/)?caobunga\s+(?:-\S+\s+)*(?:register|providers)(?![\w-])"
 )
 
 # Tool name → the `tool_input` key holding the path it writes.

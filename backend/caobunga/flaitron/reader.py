@@ -22,8 +22,7 @@ from caobunga.flaitron.grammar import (
     SUGGESTED_NEXT,
     TASK_LINE,
     UNATTENDED_MARKER,
-    _blank_html_comments,
-    fence_mask,
+    _masked_lines,
     parse_blocked_by,
 )
 
@@ -38,11 +37,10 @@ def _plan_body_lines(markdown: str) -> Iterator[tuple[int, str, PlanPriority, bo
     The one shared walk `parse_plan` and `unparsed_plan_rows` both fold
     (CBN-115) — a single masking pass (HTML comments blanked, fences skipped,
     headings tracked) so the two readers cannot disagree about which lines were
-    candidates. `_blank_html_comments` preserves newlines, so the yielded
+    candidates. `_masked_lines` keeps every line break, so the yielded
     numbers index the original markdown.
     """
-    lines = _blank_html_comments(markdown).splitlines()
-    fenced = fence_mask(lines)
+    lines, fenced = _masked_lines(markdown)
     current: PlanPriority | None = None
     legacy_critical = False
     for number, (line, in_fence) in enumerate(zip(lines, fenced, strict=True), start=1):
@@ -82,8 +80,8 @@ def parse_plan(markdown: str) -> list[PlanTask]:
                 extras=markers,
                 blocked_by=parse_blocked_by(description or ""),
                 # Same pairing `unparsed_plan_rows` uses: match on the blanked
-                # line, report the original. `_blank_html_comments` preserves
-                # newlines, so `number` indexes `originals` directly (CBN-119.3).
+                # line, report the original. `_masked_lines` preserves
+                # line breaks, so `number` indexes `originals` directly (CBN-119.3).
                 line=number,
                 text=originals[number - 1].rstrip(),
             )
@@ -175,7 +173,7 @@ def unparsed_plan_rows(markdown: str) -> list[UnparsedRow]:
     return rows
 
 
-def _suggested_next(markdown: str) -> str | None:
+def suggested_next(markdown: str) -> str | None:
     match = SUGGESTED_NEXT.search(markdown)
     return match.group(1) if match else None
 

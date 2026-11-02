@@ -2,9 +2,10 @@
 
 `caobunga.status_render` owns how a project's state reads in a terminal: the
 fleet-table cells, the detail-form blocks (coverage, seed, drift, new rows,
-tree, pins), and the run-record dump. A leaf module: `models`, the flaitron
-façade, `presence`, and `pins` cross in, and nothing calls back into `cli.py`,
-which keeps the click commands and the echo/store orchestration around these.
+tree, pins, retained worktrees), and the run-record dump. A leaf module:
+`models`, `git`, the flaitron façade, `presence`, `retained`, and `pins` cross
+in, and nothing calls back into `cli.py`, which keeps the click commands and
+the echo/store orchestration around these.
 Split out of `cli.py` at CBN-239.
 """
 
@@ -18,8 +19,18 @@ import yaml
 
 from caobunga import pins
 from caobunga.flaitron import PLAN_REL, Coverage, Denial, TriageClass
-from caobunga.models import RunRecord, iso_z
+from caobunga.git import DIRT_SAMPLE
+from caobunga.models import (
+    ExecutionTier,
+    InvocationResult,
+    RegistryRecord,
+    RetainedWorktree,
+    RunRecord,
+    StaleReceipt,
+    iso_z,
+)
 from caobunga.presence import TreeState
+from caobunga.retained import unlanded
 
 # The seed block's commit hint carries a message so pasting it opens no editor (CBN-355).
 _SEED_COMMIT_MSG = "chore: seed [unattended] markers"
@@ -38,12 +49,16 @@ def outcome_cell(last: RunRecord | None) -> str:
     `visual-confirm` park (needs a human to look at something) sits
     indistinguishable from a routine `dependency` park in the same table
     (CBN-187). Appending the code follows `coverage_cell`'s
-    parenthetical-affix idiom rather than adding a column.
+    parenthetical-affix idiom rather than adding a column. An isolated closure
+    main did not get reads `closed (not landed)` (CBN-EPIC-450.6): the task
+    closed on its branch, and main does not have it.
     """
     if last is None:
         return "—"
     if last.park_reason:
         return f"{last.outcome.value} ({last.park_reason})"
+    if unlanded(last):
+        return f"{last.outcome.value} (not landed)"
     return last.outcome.value
 
 
@@ -178,6 +193,149 @@ def _exempt_note(state: TreeState) -> str:
     return f"open tasknote {state.exempt_task} exempt"
 
 
+def format_receipts(
+    record: RegistryRecord,
+    receipts: Sequence[tuple[InvocationResult, bool | None]],
+    stale: Sequence[StaleReceipt] = (),
+) -> list[str]:
+    """Detail-form `running` receipts, each with its pid verdict (CBN-421).
+
+    **Always emits a line**, on CBN-125's rule. Before this, a dead run's receipt
+    sat at `running` unread until the slug's next launching `run` reconciled it:
+    two days for the 2026-10-18 pair (CBN-418). Report-only, since rewriting a
+    receipt is `reconcile_stale`'s job, under the run lock this verb never takes.
+    The header splits the count by verdict: `running` is the field, not a claim
+    that the run is alive. A `stale` receipt found in `stale` gets a sub-line
+    naming every commit on HEAD since it started (CBN-444): the dead run's work if
+    it committed any, though another session's commits in that window count too.
+    """
+    if not receipts:
+        return ["receipts: none running"]
+    landed = {item.receipt_id: item.landed for item in stale}
+    verdicts = [_verdict(alive) for _, alive in receipts]
+    split = ", ".join(
+        f"{verdicts.count(v)} {v}" for v in ("live", "stale", "unknown") if v in verdicts
+    )
+    lines = [f"receipts: {len(receipts)} at running ({split})"]
+    for (receipt, alive), verdict in zip(receipts, verdicts, strict=True):
+        lines.append(f"  {receipt.receipt_id} {verdict} — {_receipt_body(record, receipt, alive)}")
+        if receipt.receipt_id in landed:
+            lines.append(f"    {landed_line(landed[receipt.receipt_id])}")
+    return lines
+
+
+def stale_lines(
+    record: RegistryRecord,
+    receipts: Sequence[tuple[InvocationResult, bool | None]],
+    stale: Sequence[StaleReceipt] = (),
+) -> list[str]:
+    """Fleet-form footer: one line per proven-dead receipt, none otherwise (CBN-421).
+
+    A footer, not a column, because a stale receipt is rare and a column would
+    print a dash on every row, every day. An `unknown` receipt (no pid) is left
+    to `status <id>`: nothing here proves it dead. The landed count rides the
+    line (CBN-444); the commit subjects are `status <id>`'s, to keep it one line.
+    """
+    landed = {item.receipt_id: item.landed for item in stale}
+    lines: list[str] = []
+    for receipt, alive in receipts:
+        if alive is not False:
+            continue
+        line = f"stale: {record.id} {receipt.receipt_id} — {_receipt_body(record, receipt, alive)}"
+        if receipt.receipt_id in landed:
+            line += f"; landed since start: {_landed_count(landed[receipt.receipt_id])}"
+        lines.append(line)
+    return lines
+
+
+def format_retained(record: RegistryRecord, entries: list[RetainedWorktree] | None) -> list[str]:
+    """Detail-form `wt-<ID>` leftovers with their recovery steps (CBN-EPIC-450.6).
+
+    Nothing for a project that does not isolate. An isolated one always gets a
+    line, on CBN-125's rule, so "none" and "git could not say" never read alike.
+    """
+    if not record.isolate:
+        return []
+    if entries is None:
+        return ["retained: unreadable (git could not list wt- branches and worktrees)"]
+    if not entries:
+        return ["retained: none"]
+    lines = [f"retained: {len(entries)} worktree(s) — the drain skips these ids"]
+    for entry in entries:
+        lines.append(f"  {entry.branch} at {entry.path} — {retained_state(entry)}")
+        lines.append(f"    recovery: {entry.recovery}")
+    return lines
+
+
+def retained_footer(record: RegistryRecord, entries: list[RetainedWorktree] | None) -> list[str]:
+    """Fleet-form footer: one line per isolated project with leftovers, none otherwise."""
+    if not record.isolate or entries == []:
+        return []
+    if entries is None:
+        return [f"retained: {record.id} unreadable"]
+    shown = ", ".join(f"{entry.branch} ({retained_state(entry)})" for entry in entries)
+    return [f"retained: {record.id} {shown} — see caobunga status {record.id}"]
+
+
+def retained_state(entry: RetainedWorktree) -> str:
+    """`unlanded: <why>`, `retained`, or `no run record` — shared with the digest."""
+    if entry.landing is None:
+        return "no run record"
+    if entry.detail:
+        return f"{entry.landing.value}: {entry.detail}"
+    return entry.landing.value
+
+
+def landed_line(landed: list[str] | None) -> str:
+    """`landed since start: N commit(s) — <sha> <subject>; …`, in `_echo_stale`'s shape.
+
+    Shared by `status <id>` and the digest (CBN-444). `None` is git unable to
+    say, kept distinct from an honest zero. Subjects are capped at `DIRT_SAMPLE`
+    with a `(+N more)` tail: a receipt no `run` will reconcile (observe,
+    disabled) keeps accruing commits on every read.
+    """
+    if landed is None:
+        return "landed since start: unreadable"
+    shown = "; ".join(landed[:DIRT_SAMPLE]) if landed else "nothing"
+    more = f" (+{len(landed) - DIRT_SAMPLE} more)" if len(landed) > DIRT_SAMPLE else ""
+    return f"landed since start: {_landed_count(landed)} — {shown}{more}"
+
+
+def _landed_count(landed: list[str] | None) -> str:
+    return "unreadable" if landed is None else f"{len(landed)} commit(s)"
+
+
+def _verdict(alive: bool | None) -> str:
+    if alive is None:
+        return "unknown"
+    return "live" if alive else "stale"
+
+
+def _receipt_body(record: RegistryRecord, receipt: InvocationResult, alive: bool | None) -> str:
+    since = iso_z(receipt.started_at)
+    if alive:
+        return f"pid {receipt.pid}, since {since}, stage {receipt.stop_reason}"
+    pid = "pid unrecorded" if alive is None else f"pid {receipt.pid} gone"
+    hint = _reconcile_hint(record, receipt)
+    return f"{pid}, since {since}, last stage {receipt.stop_reason}; {hint}"
+
+
+def _reconcile_hint(record: RegistryRecord, receipt: InvocationResult) -> str:
+    """Whether `run` will rewrite this receipt, on `_execute_run`'s own gates.
+
+    A disabled project stops before the lock and `observe` returns before
+    `reconcile_stale`. A receipt with no pid is proven dead only on the lock for
+    its own path, so one naming another path is never reconciled.
+    """
+    if not record.enabled:
+        return f"no `run` reconciles it while {record.id} is disabled"
+    if record.tier is ExecutionTier.OBSERVE:
+        return "no `run` reconciles it at tier observe"
+    if receipt.pid is None and receipt.path != record.path:
+        return "no `run` reconciles it: no pid, and not the registered path"
+    return f"the next `caobunga run {record.id}` reconciles it"
+
+
 def format_coverage(coverage: Coverage) -> list[str]:
     """Detail-form coverage: the summary line, then a block per denied task.
 
@@ -206,12 +364,12 @@ def format_coverage(coverage: Coverage) -> list[str]:
     makes the placement *visible* rather than merely present.
 
     **`unmarked` denials group under an `obvious` heading first (CBN-157).**
-    Every other denial code (`blocked`, `exploratory`, `frontier`, `handoff`, `parked`) keeps
-    `Coverage.denials`'s own dispatch order with no heading, exactly as before
-    this task — the mirrored predicate never judged them, so grouping them
-    under "needs judgment" would claim a verdict this report never reached.
-    The heading only appears once at least one `unmarked` row triages
-    `obvious`; a repo with none keeps the flat list CBN-EPIC-18.3 shipped.
+    Every other denial — a `needs-judgment` `unmarked` row and every other
+    code (`blocked`, `exploratory`, `frontier`, `handoff`, `parked`) alike —
+    follows under a `needs judgment` heading, in `Coverage.denials`'s own
+    dispatch order (docs/CONTRACT.md §"Marker coverage"; the dashboard mirrors
+    it, CBN-440). The headings only appear once at least one `unmarked` row
+    triages `obvious`; a repo with none keeps the flat list CBN-EPIC-18.3 shipped.
     """
     summary = (
         f"coverage: {coverage.marked} marked / {coverage.denied} denied of {coverage.open} open"
@@ -254,7 +412,7 @@ def _denial_lines(denial: Denial) -> list[str]:
     of someone else's sentence is the boundary `unparsed_blocked_clause` declines
     to cross.
 
-    **`triage:` sits right after `deny:` (CBN-157).** It explains *why* a
+    **`triage:` sits right after `now:` (CBN-157).** It explains *why* a
     `needs-judgment` row didn't triage `obvious` before the reader reaches the
     unrelated `warn:`/`seed:` machinery; an `obvious` row prints no `triage:`
     line at all — the heading it sits under already says so.

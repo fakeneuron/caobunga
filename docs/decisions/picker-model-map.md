@@ -16,6 +16,8 @@ Two aliases — `grok` and `codex` — are the names of providers, not models, a
 
 ## Task-class → model map — pin measurement and probe history
 
+⚠️ The codex pin below is superseded by §"Task-class → model map — GPT-6.1 Sol pin (CBN-454)". Kept as history.
+
 Pins reflect 2026-08-20 live CLI inventories; `grok_cli` / `cursor_cli` refreshed 2026-09-24 (CBN-254 — `grok models` now defaults to `grok-4.7`, and Cursor's live `cursor-agent models` listing dropped the `cursor-` prefix for the Grok 4.7 family, so the pinned Cursor medium/heavy ids were the live-listed `grok-4.7-medium` / `grok-4.7-xhigh`, not a string-replace of the old `cursor-grok-4.6-*` shape; medium was re-pinned to `grok-4.7-high` by CBN-333, 2026-10-11).
 
 A live inventory is a probe, not a catalog read, because the codex catalog is partial: `codex debug models` hides TAP-gated ids, so absence there proves nothing. The 2026-09-12 refresh (CBN-165) probed each candidate with one trivial `codex exec -m <id> --sandbox read-only` on codex-cli 0.153.4 — `gpt-5.6-sol` and `gpt-6-astra` were both refused (400 `invalid_request_error`, "not supported when using Codex with a ChatGPT account"), `gpt-5.6-terra` was accepted past model validation. Sol and Astra are account-gated and unpinned: the codex row stays flat `gpt-5.6-terra` until this account's Codex reaches them, and Astra is out of scope regardless — it is the `[xheavy]` rung, which an orchestrator never dispatches (§"Flaitron reader", CBN-114). There is no codex counterpart to `CLAUDE_RUNTIME_ALIASES`; a `CODEX_RUNTIME_ALIASES` passthrough was dropped with the pins (operator decision, 2026-09-12), and `gpt-5.6-luna` is deliberately unpinned (operator decision, 2026-09-11).
@@ -46,13 +48,13 @@ Dropping `fable` / `mythos` from `ALIASES`, the Claude passthrough, and the Curs
 
 ### Effort-ladder prose as it stood in `CONTRACT.md` (CBN-298)
 
-Flat rather than per-provider because the ladders verified live on 2026-08-26 diverge only *above* these rungs, and all three flag-taking providers (`claude_code`, `grok_cli`, `codex`) share exactly `low/medium/high/xhigh`; `cursor_cli` has none (encoded in the model id, so the pin table above routes it). The value reaches the CLI through `local.Recipe.effort_argv` (§Worker interface → `local`). Why flat, and why `xhigh` for heavy: [decisions/picker-model-map.md](picker-model-map.md) §"Task-class → model map — effort ladder flat-mapping (CBN-EPIC-15.3)".
+Flat rather than per-provider because the ladders verified live on 2026-08-26 diverge only *above* these rungs, and all three flag-taking providers (`claude_code`, `grok_cli`, `codex`) share exactly `low/medium/high/xhigh`; `cursor_cli` has none (encoded in the model id, so the pin table above routes it). The value reaches the CLI through `recipes.Recipe.effort_argv` (§Worker interface → `local`). Why flat, and why `xhigh` for heavy: [decisions/picker-model-map.md](picker-model-map.md) §"Task-class → model map — effort ladder flat-mapping (CBN-EPIC-15.3)".
 
 ## Task-class → model map — effort per provider (CBN-332)
 
 This supersedes both flat-table entries above. `EFFORT` is now keyed by provider, and each row is that provider's column of flaitron `docs/PLATFORMS.md` §"Tier × platform map" (as of 2026-10-08). The shared ladder floor was never the reason to stay flat. It only meant a flat table was *possible*, and CBN-331 showed what that costs: one column cannot fit providers whose model id does or does not change per class.
 
-⚠️ `grok_cli`'s light cell and the kimi/copilot names are superseded by §"Task-class → model map — roster drop and grok light upper end (CBN-360)", below. The claude and codex rows still stand.
+⚠️ `grok_cli`'s light cell and the kimi/copilot names are superseded by §"Task-class → model map — roster drop and grok light upper end (CBN-360)", below. The claude row still stands. The codex row, and Grok's light cell again, are superseded by §"Task-class → model map — v7.4.0 effort retarget (CBN-416)".
 
 - `claude_code` stays `high` / `medium` / `high` (CBN-331). Its model id separates light from heavy.
 - `grok_cli` takes `medium` / `high` / `xhigh` (operator decision 2026-10-11). The map's light cell is a range (`medium`–`high`). The operator took the low end over the map's "upper end when in doubt" so the three classes stay distinct on a flat model id, where effort is the only thing separating them.
@@ -66,11 +68,37 @@ Effort now depends on the picked provider, so `loop` resolves it per pick in `_l
 
 Two changes, both on the live tables in `CONTRACT.md`.
 
-`kimi_cli` and `copilot_cli` leave the v1 provider set: the enum, the binary and dump tables, the pin table, and the catalog map. `opencode_cli` stays named and still has no `local.RECIPES` row. A registration of it remains valid and still fails at launch with the supported-set `UserError` (CBN-097). Stored registry `provider` values are free strings, so an old kimi or copilot pin is not rewritten; the next pick rejects it as an unknown provider.
+⚠️ The effort claims in this section are superseded by §"Task-class → model map — v7.4.0 effort retarget (CBN-416)". The kimi/copilot roster drop stands.
+
+`kimi_cli` and `copilot_cli` leave the v1 provider set: the enum, the binary and dump tables, the pin table, and the catalog map. `opencode_cli` stays named and still has no `recipes.RECIPES` row. A registration of it remains valid and still fails at launch with the supported-set `UserError` (CBN-097). Stored registry `provider` values are free strings, so an old kimi or copilot pin is not rewritten; the next pick rejects it as an unknown provider.
 
 `grok_cli`'s light cell moves from `medium` to `high`, the upper end of flaitron's `medium`–`high` range (`docs/PLATFORMS.md` §"Tier × platform map": on a range, take the upper end when in doubt). `[light]` and `[medium]` on `grok_cli` now dispatch the same argv (`grok-4.7` @ `high`). `[heavy]` stays `xhigh`. This reverses the 2026-10-11 low-end choice in the CBN-332 section, which existed so the three classes stayed distinct on a flat model id.
 
 `codex` stays `medium` / `high` / `xhigh`. Its model id is also flat (Terra), and effort is still the only thing separating its classes. Copying Grok's new light cell would collapse that separation. Cursor's pins are unchanged: medium and heavy already match `grok_cli`'s `high` and `xhigh`.
+
+## Task-class → model map — v7.4.0 effort retarget (CBN-416)
+
+Flaitron v7.4.0 (`docs/PLATFORMS.md` §"Tier × platform map", 2026-10-20) names one cell per tier. Grok `[light]` is `Grok @ medium`, `[moderate]` is `Grok @ high`, and `[heavy]` is `Grok @ xhigh`. Codex `[light]` and `[moderate]` are both `Sol @ medium`, and `[heavy]` is `Sol @ high`.
+
+⚠️ The Terra pin and the no-probe rule in the next paragraph are superseded by §"Task-class → model map — GPT-6.1 Sol pin (CBN-454)". The effort cells stand.
+
+Caobunga copies those effort cells and does not copy the Sol model id. Sol is not on this account's free tier. CBN-165 already refused `gpt-5.6-sol` on a ChatGPT-account Codex, and the PLAN line forbids a new probe and a Sol relaunch. The pin stays `gpt-5.6-terra`. Effort on that flat id becomes `medium` / `medium` / `high`, so light and medium share a rung. Heavy drops from `xhigh` to `high`.
+
+Grok's light cell moves from CBN-360's `high` back to `medium`. Medium stays `high` and heavy stays `xhigh`, so the three Grok classes are distinct again. Claude is unchanged (`sonnet@high` / `opus@medium` / `opus@high`). Cursor's medium and heavy ids already encode `high` and `xhigh`, which still match Grok's medium and heavy. No Cursor edit.
+
+`[moderate]` is an alias of `TaskClass.MEDIUM` beside legacy `[medium]`. The three-class ladder stays. Unmarked triage admits both tokens, matching candidacy clause 1. A marked `[moderate]` row already classified as medium via the unknown-token default; the alias makes that bucket intentional, and the exhaustive `set(ALIASES)` test pins it.
+
+## Task-class → model map — runner cap (CBN-448)
+
+Flaitron v8.2.0's `docs/EXTERNAL-AGENTS.md` step 11 makes the runner cap the caller's: flaitron's model gate compares a row's tag with the session it finds and never limits what a caller launches. An operator-less caller runs the families whose ceiling is the heavy band (Opus, Sol, Grok) at any effort up to `xhigh`, and never a frontier model (Fable, Mythos, Astra) at any effort, because the exclusion is by name.
+
+Caobunga already held most of it. The CBN-331 frontier dimension denies frontier PLAN tokens at launch, and every `MODELS` / `EFFORT` cell was heavy-ceiling at ≤ `xhigh`. CBN-448 closes the two gaps. `astra` joins `grammar.FRONTIER_TOKENS`, so an `[astra]` row is denied like `[fable]`. A registry `model:` pin, which `picker._override` used to pass to argv verbatim, is refused at pick when its id names a frontier family. The match is a case-folded word of the id (split on anything not alphanumeric), so `claude-fable-5-1` and `gpt-6-astra` both trip it while `affable-1` does not. The refusal is a plain `ValueError`, which the loop already maps to exit 2 with no record and no launch. It runs ahead of the not-installed check, so a frontier pin on an absent provider reads as the registration error it is, not machine state (exit 5). It is pick-time only, so a pin registered earlier is caught too, and `register` needs no second check. `taskmap.FRONTIER_FAMILIES` derives from `grammar.FRONTIER_TOKENS`, so a new frontier name is one edit. A `test_taskmap` guard pins every `EFFORT` cell and Cursor-baked rung to ≤ `xhigh`.
+
+## Task-class → model map — GPT-6.1 Sol pin (CBN-454)
+
+The operator lifted CBN-416's no-probe rule on 2026-11-01 for exactly one probe. Flaitron v8.2.0's Codex column (`docs/PLATFORMS.md` §"Tier × platform map") now names GPT-6.1 Sol, and Terra is kept only during the GPT-6 rollout. `codex debug models` on codex-cli 0.166.0 lists `gpt-6.1-sol`. The catalog is partial and listed the refused `gpt-5.6-sol` too, so that proved nothing; the probe decided. One `codex exec -m gpt-6.1-sol --sandbox read-only` with a one-word prompt was accepted on this ChatGPT-account Codex (exit 0, header `model: gpt-6.1-sol`, reply `ok`).
+
+All three codex `MODELS` cells pin `gpt-6.1-sol`. The map names Sol for every tier, so the row stays flat. The effort cells are unchanged (`medium` / `medium` / `high`, CBN-416). They were already the map's Sol column, so light and medium still share one dispatch. Sol is a heavy-ceiling family, so the CBN-448 runner cap still holds. `gpt-6-astra` stays unpinned and out of scope (frontier, CBN-448). Luna and Terra stay unpinned.
 
 ## Picker — pin/allow-list merge incident (CBN-EPIC-95.2, CBN-EPIC-95.3, CBN-EPIC-95.4)
 
@@ -93,3 +121,92 @@ The four `hermes_*` fields stay optional on the model and are no longer written.
 ## Compatibility — stray `caobunga-status.md` history (CBN-188.2, CBN-188.3, CBN-154)
 
 A `caobunga-status.md` left in a target repo from before CBN-188.2 moved the last-run card caller-side is not Caobunga's to clean (§"Fleet boundary" — the card is caller-side, not a sanctioned producer write). The CBN-154 gate and dirt exemption that once shielded it were retired at CBN-188.3: the leftover file is now ordinary blocking dirt, the operator's own `git rm`.
+
+## Task-class → model map — provider-name alias rationale (CBN-411)
+
+> Extracted from CONTRACT at CBN-411. This passage preserves the explanation and its original rule context; CONTRACT is authoritative for current rules. Unlinked section references in this excerpt refer to CONTRACT.
+
+**A provider-name token is a tier hint and never a provider pin.** Two aliases —
+`grok` and `codex` — are the names of *providers*, not models, and they are
+bucketed like any other token: both to `medium`. The two consequences are stated in CONTRACT §"Task-class → model map".
+
+## Task-class → model map — flat pins and alias rationale (CBN-411)
+
+> Extracted from CONTRACT at CBN-411. This passage preserves the explanation and its original rule context; CONTRACT is authoritative for current rules. Unlinked section references in this excerpt refer to CONTRACT.
+
+Grok has no lighter SKU (`grok-4.5` is older, not lighter), so the flat Grok/Codex rows pick no distinct model id per class. The task class is **not** discarded for them — the CONTRACT effort map (§"Task-class → model map") routes it (CBN-EPIC-15.3). Claude's advertised aliases are `sonnet` / `opus` / `fable` — coding floor is `sonnet` even for `[light]`. `[medium]` takes `opus` on `claude_code` (CBN-255); only the effort rung separates it from `[heavy]`. When the PLAN `[model]` token is itself a Claude runtime alias (`sonnet`, `opus`), `resolve` passes it through on `claude_code`. `fable` is advertised but never dispatched (CBN-331 caps caobunga at `[heavy]`), so it has no passthrough and no `cursor_cli` override. Cursor light uses Composer; medium/heavy stay on the Grok 4.7 family with effort in the id. The dispatch measurement behind the medium-cell choice: [decisions/picker-model-map.md](picker-model-map.md) §"Task-class → model map — the medium-cell measurement (CBN-255)".
+
+## Task-class → model map — effort-cell provenance (CBN-411)
+
+> Extracted from CONTRACT at CBN-411. This passage preserves the explanation and its original rule context; CONTRACT is authoritative for current rules. Unlinked section references in this excerpt refer to CONTRACT.
+
+⚠️ The Grok light cell and the Codex effort row in this extract are historical. Current cells: §"Task-class → model map — v7.4.0 effort retarget (CBN-416)".
+
+Each column follows that provider's column of flaitron `docs/PLATFORMS.md` §"Tier × platform map" (2026-10-08). `claude_code` is `sonnet@high`, `opus@medium`, `opus@high` (CBN-331): light runs a higher rung than medium on purpose, because it is the smaller model. `grok_cli` and `codex` have flat model ids. Grok's light cell takes the upper end of the map's `medium`–`high` range (CBN-360), so `[light]` and `[medium]` share `high` and only `[heavy]` (`xhigh`) differs. `codex` stays `medium` / `high` / `xhigh`: Terra is pinned flat where the map steps from Sol to Astra, and effort is still what separates its classes (operator decision 2026-10-11, kept by CBN-360). `cursor_cli` and `opencode_cli` have no row and resolve to `None`. Cursor encodes effort in the model id, so the CONTRACT pin table (§"Task-class → model map") routes it, and its heavy `grok-4.7-xhigh` matches `grok_cli`'s heavy rung. Its medium `grok-4.7-high` matches `grok_cli`'s `high` (CBN-333), so a re-pick between the two keeps a `[medium]` run's rung. Every cell sits inside its vendor's live ladder (verified 2026-08-26). The value reaches the CLI through `recipes.Recipe.effort_argv` (§Worker interface → `local`). Why per-provider, and the operator choices: [decisions/picker-model-map.md](picker-model-map.md) §"Task-class → model map — effort per provider (CBN-332)" and §"Task-class → model map — roster drop and grok light upper end (CBN-360)".
+
+## Task-class → model map — inventory verification rationale (CBN-411)
+
+> Extracted from CONTRACT at CBN-411. This passage preserves the explanation and its original rule context; CONTRACT is authoritative for current rules. Unlinked section references in this excerpt refer to CONTRACT.
+
+Pins reflect live CLI inventories (2026-08-20, refreshed for `grok_cli` / `cursor_cli` (CBN-254; Cursor medium re-pinned CBN-333, 2026-10-11) and `codex` (CBN-165)); a live inventory is a probe, not a catalog read, because the codex catalog is **partial**. The codex row stays flat `gpt-5.6-terra`; `gpt-5.6-luna` and the account-gated ids are deliberately unpinned. Account-gating, unpinned ids, and probe history: [decisions/picker-model-map.md](picker-model-map.md) §"Task-class → model map — pin measurement and probe history".
+
+## Task-class → model map — catalog comparison rationale (CBN-411)
+
+> Extracted from CONTRACT at CBN-411. This passage preserves the explanation and its original rule context; CONTRACT is authoritative for current rules. Unlinked section references in this excerpt refer to CONTRACT.
+
+**Stale-pin guard (CBN-166).** `caobunga.pins.check_all()` is a second, read-only pass over this same table — it never refuses a dispatch and never re-pins. For each *installed* v1 provider, `caobunga status <project>` reports one `pins:` block (the fleet table gains no column), and since CBN-256 the `caobunga digest` CLI verb ends with the same lines under `## Model pins`: a provider with no non-interactive catalog command reports `pins: <provider> catalog unavailable` (today: claude, opencode); a provider whose catalog is declared partial (`pins.CATALOG_PARTIAL` — codex) reports `pins: <provider> catalog partial (TAP-gated ids hidden)` and never compares its pins against the catalog; any other installed provider with a readable catalog warns `pins: <provider> <id> not in catalog` per pinned id the catalog does not list. A catalog command that fails to run or parse, or that parses to no ids at all, degrades to `pins: <provider> catalog unreadable`. A clean provider prints nothing beyond the summary line. An uninstalled provider is not reported at all. Degrade-posture rationale and the CBN-256 grok/cursor wiring: [decisions/picker-model-map.md](picker-model-map.md) §"Task-class → model map — stale-pin guard degrade posture (CBN-166)".
+
+## Out of scope — implementation ownership history (CBN-460)
+
+Context relocated from CONTRACT; current rules remain there. Unlinked section references and positional wording refer to the original CONTRACT context.
+
+| Concern | Owner |
+|---|---|
+| On-disk tree (`CAOBUNGA_HOME`), flock, `--replace` | CBN-010 (landed) |
+| PLAN.md → next-task candidate | CBN-011 (landed) |
+| Worker launch / send / shutdown seam | CBN-012 (landed; `cao` adapter retired CBN-204, `local` since CBN-EPIC-9.2) |
+| Gated loop wiring | CBN-013 (landed) |
+| Pretty CLI report | CBN-014 (landed) |
+| Usage adapters | CBN-020 (landed) |
+| Task-class → model map | CBN-021 (landed) |
+| Picker + why-log | CBN-022 (landed) |
+| Picker into gated loop | CBN-023 (landed) |
+| Hermes review session (assemble + launch the brief) | CBN-030 (landed; retired CBN-258) |
+| Epic rollup writer | CBN-031 (landed) |
+| Daily fleet digest | CBN-032 (landed) |
+| GitHub PR comment (not picked; snippet retired CBN-188.2) | CBN-033 |
+| Status API | CBN-040 (landed) |
+| Status UI | CBN-041 (landed) |
+| Later tiers actually running | CBN-050 (landed) |
+| Hermes observation window (N or T) | CBN-051 (landed; retired CBN-258) |
+| Additional worker providers + Fable routing | CBN-052 (landed; Fable denied, CBN-331) |
+| Registry provider allow-list (`--providers`) | CBN-091 (landed) |
+| Fleet batch verb (`fleet`) | CBN-312 (landed; reopened CBN-124's decline — §"Entry points") |
+
+## Task-class → model map — provider-token examples (CBN-460)
+
+Context relocated from CONTRACT; current rules remain there. Unlinked section references and positional wording refer to the original CONTRACT context.
+
+**A provider-name token is a tier hint and never a provider pin.** `grok` and `codex` both classify as `medium`; provider choice does not read `plan_model` as a preference. Background: [decisions/picker-model-map.md](picker-model-map.md) §"Task-class → model map — provider-name alias rationale (CBN-411)".
+
+- `[grok]` does **not** route the task to `grok_cli`. Provider choice belongs to
+  §Picker (leftover, registry pins, allow-list) and never reads `plan_model` as a
+  preference. A `[grok]` task on a Claude-only allow-list runs on `claude_code`
+  at medium.
+- `[grok]` cannot express *"a heavy run on Grok."* The token carries one axis —
+  how hard the task is — so the only way to ask for heavy is `[heavy]`, which
+  then reaches Grok's `xhigh` rung through the effort map below.
+
+To pin a provider, register one — `register --provider` / `--providers`, not the PLAN token. Why the conflation is deliberate: [decisions/picker-model-map.md](picker-model-map.md) §"Task-class → model map — provider-name tokens are tier hints, never a pin".
+
+## Picker — unknown-leftover consequence (CBN-460)
+
+Context relocated from CONTRACT; current rules remain there. Unlinked section references and positional wording refer to the original CONTRACT context.
+
+Today leftover dumps are all `unknown`, so ranking collapses to the order tiebreak: without an allow-list that is the first installed v1 worker, and with one it is the operator's first declared worker. When a leftover parser is eventually wired to a stable command, budget spreading takes over inside the allow-list with no further change.
+
+## Task-class → model map — effort-map provenance (CBN-460)
+
+Context relocated from CONTRACT; current rules remain there. Unlinked section references and positional wording refer to the original CONTRACT context.
+
+Effort follows flaitron's v7.4.0 tier/platform map (2026-10-20): Claude light/medium/heavy is `sonnet@high` / `opus@medium` / `opus@high` (CBN-331); Grok is `medium` / `high` / `xhigh` (CBN-416). Codex runs flat `gpt-6.1-sol` (CBN-454) at the map's Sol effort: `medium` / `medium` / `high` (CBN-416). Cursor and OpenCode have no effort row and return `None`; Cursor's medium/heavy model ids encode `high` / `xhigh`, matching Grok's medium and heavy (CBN-333). Cells are within vendor ladders (verified 2026-08-26); values reach argv through `Recipe.effort_argv`. Background: [decisions/picker-model-map.md](picker-model-map.md) §"Task-class → model map — v7.4.0 effort retarget (CBN-416)".

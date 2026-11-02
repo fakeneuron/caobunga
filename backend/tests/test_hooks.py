@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from caobunga.hooks import DENIAL, REGISTRY_DENIAL, guard, home
-from caobunga.local import FOREGROUND_HOOK_COMMAND
+from caobunga.recipes import FOREGROUND_HOOK_COMMAND
 from caobunga.store import ENV_HOME, default_home
 
 
@@ -52,7 +52,7 @@ def test_unreadable_input_never_blocks() -> None:
 
 
 def test_module_entry_is_what_the_launcher_registers() -> None:
-    """`python -m caobunga.hooks` is the hook command (`local.FOREGROUND_HOOK_COMMAND`)."""
+    """`python -m caobunga.hooks` is the hook command (`recipes.FOREGROUND_HOOK_COMMAND`)."""
     payload = json.dumps({"tool_name": "Bash", "tool_input": {"run_in_background": True}})
     proc = subprocess.run(  # noqa: S603
         shlex.split(FOREGROUND_HOOK_COMMAND),
@@ -99,6 +99,8 @@ def test_home_matches_the_store_for_a_relative_env_value(monkeypatch: pytest.Mon
         "uv run --directory backend caobunga register /r",
         "CAOBUNGA_HOME=/x caobunga register /r",
         "echo $(caobunga register /r)",
+        "caobunga providers codex",
+        "uv run caobunga providers --clear",
     ],
 )
 def test_denies_caobunga_register_in_bash(command: str) -> None:
@@ -114,6 +116,7 @@ def test_denies_caobunga_register_in_bash(command: str) -> None:
         "caobunga-mcp-suite register",
         "uv run pytest -q tests/test_cli.py -k register",
         "caobunga registered",
+        "grep -n providers backend/caobunga/cli.py",
         'grep -rn "caobunga register" docs/',
         "git commit -m 'operator runs caobunga register to retier'",
         "cat <<'EOF'\nthe operator runs caobunga register to retier\nEOF",

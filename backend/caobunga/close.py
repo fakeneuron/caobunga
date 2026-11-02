@@ -56,6 +56,9 @@ class CloseSnapshot(BaseModel):
     next_task: str | None = None
     escalation: Escalation | None = None
     park_reason: str | None = None
+    # The prose half of `park-reason:`, unclipped (CBN-448): flaitron ends it in
+    # the one question the operator must answer; the handoff line prints it.
+    park_prose: str | None = None
     # Follow-up lines the closing worker proposed (CBN-121). `None` when the note
     # carried no follow-up section, or carried one with nothing in it — a section
     # reading "**None.**" is saying there is nothing to file.
@@ -122,6 +125,7 @@ def parked_snapshot(
         summary=f"{lede}: {prose}" if prose else lede,
         escalation=escalation,
         park_reason=code,
+        park_prose=prose,
         new_rows=rows,
         follow_ups=follow_ups,
         foreign_commits=foreign_commits,
@@ -257,6 +261,7 @@ def inspect_close(
     drain: bool = False,
     baseline: Collection[str] | None = None,
     strict_attribution: bool = False,
+    retained: Collection[str] = (),
 ) -> CloseSnapshot | None:
     """Return a snapshot when this task has closed; None if still running.
 
@@ -281,8 +286,11 @@ def inspect_close(
     returns `None` rather than naming `head`. Off, a closure is recorded against
     `head` so the record always carries a commit; on, the caller keeps the
     snapshot it already has.
+
+    `retained` is the pick's `wt-<ID>` denial set (CBN-EPIC-450.6), so
+    `next_task` names only a row the next dispatch would run.
     """
-    project = read_project(root, unattended=unattended, drain=drain)
+    project = read_project(root, unattended=unattended, drain=drain, retained=retained)
     rows = diff_new_rows(project.tasks, baseline)
     open_notes = {note.task_id: note for note in project.open_tasknotes}
     open_note = open_notes.get(task_id)
@@ -316,12 +324,14 @@ def inspect_close(
             return None
         close_sha = head
     foreign, filed = split_window_commits(root, start_sha, head, rows, exclude=close_sha)
-    next_task = _next_after(project, task_id, unattended=unattended)
+    next_task = _next_after(project, task_id, unattended=unattended, retained=retained)
     if archived is not None:
         shown = git_show(root, archived)
         text = shown or ""
         summary = extract_summary(text) or task.description or f"Closed {task_id}."
-        summary = f"{summary} — {tree_after(root, task_id)}"
+        foreign_shas = [commit.sha for commit in foreign or []]
+        tree = tree_after(root, task_id, since=start_sha, foreign=foreign_shas)
+        summary = f"{summary} — {tree}"
         outcome = Outcome.DE_SCOPED if is_descoped(text) else Outcome.CLOSED
         # An unreadable note is "not read", never `missing` (CBN-257). A
         # de-scope has no diff to grade, so an unticked box there is `na`.
@@ -436,6 +446,7 @@ def reinspect_settled(
     drain: bool = False,
     baseline: Collection[str] | None = None,
     on_branch: bool = False,
+    retained: Collection[str] = (),
 ) -> CloseSnapshot:
     """Re-read a closure once its worker has settled (CBN-275).
 
@@ -462,7 +473,24 @@ def reinspect_settled(
     than falling back to HEAD, while a re-read that names another commit is a
     real re-attribution and is adopted. The `suite` measured before this pass
     rides onto the fresh snapshot.
+
+    A park re-reads on the final pass too (CBN-443): the first poll that sees
+    `status: blocked` returns before the worker's park commit lands, so only the
+    final read can name it. A re-read that is no longer a park keeps the first.
     """
+    if snap.outcome is Outcome.BLOCKED:
+        if not on_branch:
+            return snap
+        return _reread_park(
+            root,
+            task_id,
+            start_sha,
+            snap,
+            unattended=unattended,
+            drain=drain,
+            baseline=baseline,
+            retained=retained,
+        )
     if snap.outcome not in CLOSURE_OUTCOMES or snap.commit_sha is None:
         return snap
     try:
@@ -477,6 +505,7 @@ def reinspect_settled(
             drain=drain,
             baseline=baseline,
             strict_attribution=reachable,
+            retained=retained,
         )
     except (OSError, GitUnreadable, UserError):
         return snap
@@ -485,11 +514,41 @@ def reinspect_settled(
     return fresh.model_copy(update={"log_path": snap.log_path, "suite": snap.suite})
 
 
+def _reread_park(
+    root: Path,
+    task_id: str,
+    start_sha: str,
+    snap: CloseSnapshot,
+    *,
+    unattended: bool,
+    drain: bool,
+    baseline: Collection[str] | None,
+    retained: Collection[str],
+) -> CloseSnapshot:
+    """`snap` re-read once its parked worker has stopped, for a late park commit (CBN-443)."""
+    try:
+        fresh = inspect_close(
+            root,
+            task_id,
+            start_sha,
+            unattended=unattended,
+            drain=drain,
+            baseline=baseline,
+            retained=retained,
+        )
+    except (OSError, GitUnreadable, UserError):
+        return snap
+    if fresh is None or fresh.outcome is not Outcome.BLOCKED:
+        return snap
+    return fresh.model_copy(update={"log_path": snap.log_path})
+
+
 def _next_after(
     project: ProjectRead,
     closed_id: str,
     *,
     unattended: bool = False,
+    retained: Collection[str] = (),
 ) -> str | None:
     """The id this project runs next, read at the posture that produced the run.
 
@@ -518,7 +577,11 @@ def _next_after(
     suggested = project.suggested_next
     if suggested and suggested != closed_id:
         if dispatchable(
-            project.tasks, suggested, unattended=unattended, notes=project.open_tasknotes
+            project.tasks,
+            suggested,
+            unattended=unattended,
+            notes=project.open_tasknotes,
+            retained=retained,
         ):
             return suggested
     candidate: NextTask | None = project.candidate

@@ -2,7 +2,8 @@
 
 `caobunga.wait` owns the "is the worker done, and how did it end" question —
 the watchdog-woken close poll (`wait_for_close`), the post-close settle grace
-(`settle_worker`), the phase echo the poll rides (`_echo_phase_progress`), and
+(`settle_worker`), the phase echo the poll rides (`_echo_phase_progress`), the
+`progress:` heartbeat carried through settle and suite (`SuiteHeartbeat`), and
 the exit-detail fragment folded into every `WorkerError` it raises
 (`_exit_detail`). A leaf module: `close`, `errors`, the flaitron façade,
 `models`, `text`, and `worker` cross in, and nothing calls back into
@@ -14,7 +15,7 @@ from __future__ import annotations
 import re
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -22,7 +23,7 @@ from caobunga.close import CloseSnapshot, inspect_close
 from caobunga.errors import GitUnreadable, WorkerError
 from caobunga.flaitron import PLAN_REL, TASKNOTE_DIR_REL, phase_progress
 from caobunga.models import Escalation
-from caobunga.text import clip, read_text_or_none, strip_ansi
+from caobunga.text import clip, read_text_or_none
 from caobunga.worker import (
     BUSY_STATUSES,
     STATUS_ERROR,
@@ -39,6 +40,11 @@ DEFAULT_POLL = 1.0
 # touches the same repo (CBN-EPIC-9.5 F1). A grace, not a gate: on expiry the run
 # proceeds, so a wedged worker degrades to the old behavior instead of aborting.
 SETTLE_GRACE = 30.0
+# Seconds between `progress:` heartbeat echoes during the close wait (CBN-EPIC-449.2),
+# so a long phase never looks like a silent hang. Echo-only, never stored.
+HEARTBEAT = 60.0
+# Cap on the `tool:` line a heartbeat quotes (CBN-EPIC-449.3): one terminal line, not a payload.
+ACTIVITY_MAX = 100
 
 
 # Closed phrase list for a usage/session-limit refusal (CBN-213). Case-insensitive,
@@ -93,25 +99,28 @@ def _has_marker(lowered: str, markers: tuple[str, ...], *, word_start: bool = Fa
 
 
 def is_usage_limit_line(line: str) -> bool:
-    """True when `line` names a usage/session-limit refusal (`USAGE_LIMIT_MARKERS`)."""
+    """True when `line` names a usage/session-limit refusal (`USAGE_LIMIT_MARKERS`).
+
+    Worker tails are already normalized at capture (CBN-410). Match each line
+    independently so a phrase never spans two captured lines.
+    """
     return _has_marker(line.lower(), USAGE_LIMIT_MARKERS)
 
 
 def _summary_line(tail: tuple[str, ...], causes: tuple[str, ...] = ()) -> str | None:
     """The tail line worth quoting in an escalation summary, or `None`.
 
-    ANSI is stripped first, so a bare colour reset is not a line. A multi-line
-    JSON error ends in a bare `}` (CBN-283, a fleet repo's FE-104) and may trail
-    `"type": "billing"` after the message, so the newest informative line is the
+    Tails arrive normalized, with presentation-only lines already removed. A
+    multi-line JSON error ends in a bare `}` (CBN-283, a fleet repo's FE-104)
+    and may trail `"type": "billing"` after the message, so the newest informative line is the
     last resort: prefer one that matched a usage-limit marker (the same phrase
     list `launch._is_usage_limit_refusal` keys on), then one matching a `causes`
     marker that is not a trailing aside (CBN-292, CBN-300; stdout passes them,
     stderr none), then a `"message"` line (CBN-285).
     """
-    plain = (strip_ansi(line) for line in tail)
-    lines = [(line, line.lower()) for line in plain if any(c.isalnum() for c in line)]
+    lines = [(line, line.lower()) for line in tail if any(c.isalnum() for c in line)]
     for hit in (
-        lambda _ln, low: _has_marker(low, USAGE_LIMIT_MARKERS),
+        lambda ln, _low: is_usage_limit_line(ln),
         lambda ln, low: not _ASIDE_PREFIX.match(ln) and _has_marker(low, causes, word_start=True),
         lambda ln, _low: '"message"' in ln,
     ):
@@ -150,13 +159,24 @@ def _exit_detail(client: Worker, session: Session) -> str:
     return " (" + "; ".join(parts) + ")"
 
 
+def format_elapsed(seconds: float) -> str:
+    """`42s`, `3m12s`, or `1h02m` — the elapsed stamp on `phase:` / `progress:` echoes."""
+    whole = max(0, int(seconds))
+    if whole < 60:
+        return f"{whole}s"
+    if whole < 3600:
+        return f"{whole // 60}m{whole % 60:02d}s"
+    return f"{whole // 3600}h{whole % 3600 // 60:02d}m"
+
+
 def _echo_phase_progress(
     root: Path,
     task_id: str,
     last: str | None,
     echo: Callable[[str], None] | None,
+    elapsed: float,
 ) -> str | None:
-    """Echo `phase: …` when the open tasknote has reached a new phase.
+    """Echo `phase: … · <elapsed>` when the open tasknote has reached a new phase.
 
     Skip-not-fail (CBN-168's vanished-path posture): a missing or unreadable
     note leaves `last` unchanged. Echo-only — nothing is stored.
@@ -169,8 +189,103 @@ def _echo_phase_progress(
     token = phase_progress(text)
     if token is None or token == last:
         return last
-    echo(f"phase: {token}")
+    echo(f"phase: {token} · {format_elapsed(elapsed)}")
     return token
+
+
+def _activity_segment(activity: tuple[int, str | None]) -> str:
+    """` · 14 tool calls · tool: Bash uv run pytest` — or `""` before the first tool call."""
+    count, last = activity
+    if count <= 0:
+        return ""
+    segment = f" · {count} tool call{'' if count == 1 else 's'}"
+    return f"{segment} · {clip(last, limit=ACTIVITY_MAX)}" if last else segment
+
+
+def _echo_heartbeat(
+    echo: Callable[[str], None] | None,
+    elapsed: float,
+    due: float,
+    phase: str | None,
+    activity: Callable[[], tuple[int, str | None]],
+) -> float:
+    """Echo `progress: <elapsed> elapsed · phase <token>` once `due` has passed (CBN-EPIC-449.2).
+
+    Offsets are seconds since the wait began; returns the next due offset. One
+    line per poll at most: a poll that overslept several marks (a suspended
+    laptop) skips the missed ones rather than bursting. Echo-only. The worker's
+    tool-call count and last `tool:` line trail it once it has called a tool
+    (CBN-EPIC-449.3); `activity` is read only when a line is due.
+    """
+    if echo is None or elapsed < due:
+        return due
+    echo(
+        f"progress: {format_elapsed(elapsed)} elapsed · phase {phase or 'none yet'}"
+        f"{_activity_segment(activity())}"
+    )
+    return _next_due(due, elapsed)
+
+
+def _next_due(due: float, elapsed: float) -> float:
+    """The first `HEARTBEAT` mark after `elapsed`: an oversleep past several marks echoes once."""
+    while due <= elapsed:
+        due += HEARTBEAT
+    return due
+
+
+class SuiteHeartbeat:
+    """The `progress:` heartbeat carried past the close, through settle and suite (CBN-EPIC-449.5).
+
+    The suite verbs block in a subprocess for up to their ceilings, so no poll
+    loop runs to drive `_echo_heartbeat`: a daemon thread echoes
+    `progress: <elapsed> elapsed · <stage>` at each whole `HEARTBEAT` mark since
+    `started` — the close wait's start, so the marks continue its timeline. The
+    owner sets `stage` (`settle`, `suite test`, …) as it goes. Echo-only; a no-op
+    without an echo or a start. Leaving the `with` stops and joins the thread,
+    so no line trails the verdict.
+    """
+
+    def __init__(
+        self,
+        echo: Callable[[str], None] | None,
+        started: float | None,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.stage = "settle"
+        self._echo = echo
+        self._started = started
+        self._clock = clock
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> SuiteHeartbeat:
+        if self._echo is not None and self._started is not None:
+            self._thread = threading.Thread(target=self.beat, daemon=True)
+            self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            # Bounded like the watch observer's: an echo blocked on a stalled pipe
+            # must not hold the run past its suite.
+            self._thread.join(timeout=2)
+
+    def beat(self, wait: Callable[[float], bool] | None = None) -> None:
+        """Echo at each mark until `wait` (default: the stop event) reports a stop."""
+        echo, started = self._echo, self._started
+        if echo is None or started is None:
+            return
+        wait = wait or self._stop.wait
+        due = ((self._clock() - started) // HEARTBEAT + 1) * HEARTBEAT
+        while not wait(max(0.0, due - (self._clock() - started))):
+            elapsed = self._clock() - started
+            try:
+                echo(f"progress: {format_elapsed(elapsed)} elapsed · {self.stage}")
+            except (OSError, ValueError):
+                return  # a closed or broken stdout ends the beat, never the run
+            due = _next_due(due, elapsed)
 
 
 def _status_verdict(
@@ -217,8 +332,14 @@ def wait_for_close(
     drain: bool = False,
     baseline: list[str] | None = None,
     echo: Callable[[str], None] | None = None,
+    retained: Collection[str] = (),
+    clock: Callable[[], float] = time.monotonic,
+    started: float | None = None,
 ) -> CloseSnapshot:
-    deadline = time.monotonic() + timeout
+    # The caller's stamp, when given, so the post-close `SuiteHeartbeat` shares this zero.
+    started = clock() if started is None else started
+    deadline = started + timeout
+    next_beat = HEARTBEAT  # offset from `started`, like `elapsed`
     wake = threading.Event()
     observer = _start_watch(root, wake) if poll_interval > 0 else None
     last_phase: str | None = None
@@ -236,21 +357,35 @@ def wait_for_close(
         # unreadable still escalates below.
         try:
             return inspect_close(
-                root, task_id, start_sha, unattended=unattended, drain=drain, baseline=baseline
+                root,
+                task_id,
+                start_sha,
+                unattended=unattended,
+                drain=drain,
+                baseline=baseline,
+                retained=retained,
             )
         except (OSError, GitUnreadable):
             return None
+
+    def activity() -> tuple[int, str | None]:
+        return client.activity(session)
 
     try:
         while True:
             snap = poll()
             if snap is not None:
+                # A mark already due goes out now: `SuiteHeartbeat` resumes at the
+                # next one, so skipping it here would leave a ~2-mark gap.
+                _echo_heartbeat(echo, clock() - started, next_beat, last_phase, activity)
                 return snap
-            last_phase = _echo_phase_progress(root, task_id, last_phase, echo)
+            now = clock()
+            last_phase = _echo_phase_progress(root, task_id, last_phase, echo, now - started)
+            next_beat = _echo_heartbeat(echo, now - started, next_beat, last_phase, activity)
             snap = _status_verdict(client, session, task_id, poll)
             if snap is not None:
                 return snap
-            remaining = deadline - time.monotonic()
+            remaining = deadline - clock()
             if remaining <= 0:
                 raise WorkerError(
                     f"timed out after {int(timeout)}s waiting for {task_id} to close"

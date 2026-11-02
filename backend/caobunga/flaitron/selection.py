@@ -74,6 +74,7 @@ def pick_next(
     *,
     unattended: bool = False,
     drain: bool = False,
+    retained: Collection[str] = (),
 ) -> NextTask | None:
     """The task to dispatch next, or None when nothing is eligible.
 
@@ -117,7 +118,11 @@ def pick_next(
         # helper being reused wholesale (CBN-116).
         flight = _in_flight(tasks, by_id)
         if flight is not None and _is_eligible(
-            flight, unattended=unattended, completed_ids=done, open_ids=still_open
+            flight,
+            unattended=unattended,
+            completed_ids=done,
+            open_ids=still_open,
+            retained=retained,
         ):
             return _as_next(
                 flight,
@@ -136,6 +141,7 @@ def pick_next(
             completed_ids=done,
             note=by_id.get(task.task_id),
             open_ids=still_open,
+            retained=retained,
         )
     ]
     if not eligible:
@@ -308,7 +314,7 @@ def unparsed_blocked_clause(task: PlanTask) -> str | None:
 # rather than invented (CBN-157). Two layers (CORE-783.2, CBN-361): this tuple
 # is the mechanical screen and gains no visual or raster keywords. A hit is
 # `needs_judgment`. A miss is not a semantic pass, so it is not `obvious`;
-# that decline belongs to an LLM filer and `/ft-prep-unattended`.
+# that decline belongs to an LLM filer and `/ft-seed-unattended`.
 _HANDOFF_KEYWORDS: tuple[str, ...] = (
     "👁️",
     "🗄️",
@@ -332,12 +338,29 @@ _HANDOFF_KEYWORDS: tuple[str, ...] = (
 
 
 def _keyword_hit(description: str) -> str | None:
-    """First candidacy-predicate keyword or glyph `description` trips, or None."""
-    lowered = description.casefold()
+    """First candidacy-predicate keyword or glyph `description` trips, or None.
+
+    Backticked spans are skipped (v8.2.0, CBN-451): they name things rather than
+    ask for a person. A keyword in a path outside backticks still trips.
+    """
+    lowered = _blank_code_spans(description).casefold()
     for word in _HANDOFF_KEYWORDS:
         if word.casefold() in lowered:
             return word
     return None
+
+
+# Clause 1's tier read (v8.2.0, CORE-850.3, CBN-451): a concrete name reads by
+# its inherent tier. `haiku` light; `sonnet` / `grok` / `codex` / `sol` moderate;
+# `opus` heavy, which needs a readiness basis this reader cannot see (it lives in
+# a starter's body), so a heavy row stays `needs_judgment` with that reason. Any
+# other name (`gpt-5`, `gemini-flash`, unlisted) cannot tier to one band and
+# fails. Frontier-band and `[xheavy]` rows never reach here: `eligibility` denies
+# them above the cap first.
+_CLAUSE1_ADMITTED: frozenset[str] = frozenset(
+    {"light", "medium", "moderate", "haiku", "sonnet", "grok", "codex", "sol"}
+)
+_CLAUSE1_NEEDS_BASIS: frozenset[str] = frozenset({"heavy", "opus"})
 
 
 def _stem_predecessor_gap(task: PlanTask, completed_ids: Collection[str] | None) -> str | None:
@@ -395,11 +418,25 @@ def _unmarked_triage(
     mirrored clause is clean, the row is `needs_judgment` with
     `keyword — a miss is not a semantic pass`, never `obvious`. The semantic
     decline of a person-shaped row belongs to an LLM filer and
-    `/ft-prep-unattended`, which this reader does not run.
+    `/ft-seed-unattended`, which this reader does not run.
     """
-    if task.model is None or task.model.strip().casefold() not in ("light", "medium"):
+    # Clause 1: `[light]` or `[moderate]`, legacy `[medium]` included (v7.4.0,
+    # CBN-416), or a concrete name of that tier (v8.2.0, CBN-451).
+    # Either slot: a stacked heavy name in the trailing run still needs a basis.
+    model = task.model.strip().casefold() if task.model else None
+    heavy = min(_row_tokens(task) & _CLAUSE1_NEEDS_BASIS, default=None)
+    if heavy is not None:
+        return (
+            TriageClass.NEEDS_JUDGMENT,
+            f"model — [{heavy}] needs a complete, operator-confirmed readiness "
+            "basis (starter tasknote)",
+        )
+    if model not in _CLAUSE1_ADMITTED:
         shown = f"[{task.model}]" if task.model else "no [model] tag"
-        return TriageClass.NEEDS_JUDGMENT, f"model — {shown} is not [light]/[medium]"
+        return (
+            TriageClass.NEEDS_JUDGMENT,
+            f"model — {shown} is not [light]/[moderate] (legacy [medium]) or a name of that tier",
+        )
     if task.critical:
         return (
             TriageClass.NEEDS_JUDGMENT,
@@ -486,13 +523,23 @@ def eligibility(
     completed_ids: Collection[str] | None = None,
     note: OpenTasknote | None = None,
     open_ids: Collection[str] | None = None,
+    retained: Collection[str] = (),
 ) -> tuple[bool, str]:
-    """Ten-dimension launch eligibility with a legible reason (CBN-EPIC-17.2, CBN-116).
+    """Eleven-dimension launch eligibility with a legible reason (CBN-EPIC-17.2, CBN-116).
 
     Three membership dimensions (`queue_denial`), then the `Blocked by` gate,
-    then the six safety dimensions. The last six fire only when `unattended=True`
+    then the seven safety dimensions. The last seven fire only when `unattended=True`
     — the caller's declaration that this dispatch launches a headless worker, true
     on every launching tier since CBN-118.
+
+    The **retained** dimension (CBN-EPIC-450.5) denies a row whose id is in
+    `retained`: an isolated dispatch left its `wt-<ID>` branch or worktree
+    behind, unlanded, so main cannot show what happened there (a park's note
+    stays on the branch). The caller reads the set from git; this package only
+    takes the ids. It is checked first among the safety dimensions, ahead of
+    `parked`, because the branch may hold the only copy of the work and nothing
+    on main clears it. The row's dependents and its epic's audit need no rule of
+    their own: main still shows the row open, so `blocked` and `audit` deny them.
 
     The **parked** dimension (CBN-252) denies a row whose open tasknote (`note`)
     is `status: blocked`. A headless worker has nothing to do there: the park is
@@ -579,12 +626,9 @@ def eligibility(
                 f"[{HANDOFF_MARKER}] declared, expect a mid-run operator hand-off"
             )
         return True, "attended — this read does not consult the marker"
-    if note is not None and note.status == "blocked":
-        code, _ = split_park_reason(note.park_reason)
-        return False, (
-            f"parked — tasknote is blocked ({code or 'no park-reason'}); "
-            f"resume attended with /ft-task {task.task_id}"
-        )
+    pending = _pending_denial(task, note, retained)
+    if pending is not None:
+        return False, pending
     above_cap = _above_cap_denial(task)
     if above_cap is not None:
         return False, above_cap
@@ -599,6 +643,28 @@ def eligibility(
             return False, audit_gap
         return True, f"marked — [{UNATTENDED_MARKER}] on the PLAN line"
     return False, f"unmarked — no [{UNATTENDED_MARKER}] marker on the PLAN line"
+
+
+def _pending_denial(
+    task: PlanTask, note: OpenTasknote | None, retained: Collection[str]
+) -> str | None:
+    """The `retained` or `parked` reason: work on this row waits on the operator.
+
+    The two dimensions an attended act clears, checked first and in this order
+    (CBN-EPIC-450.5, CBN-252); see `eligibility`.
+    """
+    if task.task_id in retained:
+        return (
+            f"retained — wt-{task.task_id} exists and is not landed on main; "
+            "inspect it attended before redispatching"
+        )
+    if note is not None and note.status == "blocked":
+        code, _ = split_park_reason(note.park_reason)
+        return (
+            f"parked — tasknote is blocked ({code or 'no park-reason'}); "
+            f"resume attended with /ft-task {task.task_id}"
+        )
+    return None
 
 
 def _row_tokens(task: PlanTask) -> set[str]:
@@ -647,6 +713,7 @@ def dispatchable(
     *,
     unattended: bool = False,
     notes: list[OpenTasknote] | None = None,
+    retained: Collection[str] = (),
 ) -> bool:
     """Would this posture's pick allow `task_id`? (CBN-117)
 
@@ -659,6 +726,8 @@ def dispatchable(
     An id absent from PLAN answers `False`. It cannot be *confirmed* eligible,
     and this package refuses the undecidable rather than guessing — the same
     bias-to-refuse the safety and `Blocked by` dimensions already apply.
+    `retained` is the pick's own (CBN-EPIC-450.6), so the claim skips a row the
+    drain denies for a `wt-<ID>` leftover.
     """
     task = next((item for item in tasks if item.task_id == task_id), None)
     if task is None:
@@ -670,6 +739,7 @@ def dispatchable(
         completed_ids=completed_task_ids(tasks),
         note=note,
         open_ids=open_task_ids(tasks),
+        retained=retained,
     )
 
 
@@ -726,6 +796,7 @@ def coverage(
     tasks: list[PlanTask],
     unparsed: list[UnparsedRow] | None = None,
     notes: list[OpenTasknote] | None = None,
+    retained: Collection[str] = (),
 ) -> Coverage:
     """Fold the open launch queue into marked / denied counts plus deny reasons.
 
@@ -767,6 +838,7 @@ def coverage(
             completed_ids=done,
             note=by_id.get(task.task_id),
             open_ids=still_open,
+            retained=retained,
         )
         if allow:
             marked.append(task.task_id)
@@ -839,18 +911,19 @@ def marker_drift(tasks: list[PlanTask], baseline: Collection[str] | None) -> lis
     return drift
 
 
-def _denied_rows(
+def denied_rows(
     tasks: list[PlanTask],
     *,
     unattended: bool,
     completed_ids: Collection[str],
     notes: list[OpenTasknote] | None = None,
+    retained: Collection[str] = (),
 ) -> list[Denial]:
     """`read_project`'s posture-dependent `denied` list (CBN-146).
 
     Empty on an attended read; on an unattended one, every open-queue row the
     safety dimension refuses, in dispatch order. Lifted out of `read_project`
-    so the façade reaches one selection-private name instead of three —
+    so the façade imports one selection helper instead of three private ones —
     `CBN-143.8` declined the move at its Q2 only to keep that step's verbatim
     standard, and `CBN-143.N` F4 re-raised it once the epic had closed.
 
@@ -874,6 +947,7 @@ def _denied_rows(
                 completed_ids=completed_ids,
                 note=by_id.get(task.task_id),
                 open_ids=still_open,
+                retained=retained,
             )[1],
             completed_ids=completed_ids,
             open_ids=still_open,
@@ -890,6 +964,7 @@ def _denied_rows(
                     completed_ids=completed_ids,
                     note=by_id.get(task.task_id),
                     open_ids=still_open,
+                    retained=retained,
                 )
             ),
             key=_selection_key,
@@ -904,9 +979,15 @@ def _is_eligible(
     completed_ids: Collection[str] | None = None,
     note: OpenTasknote | None = None,
     open_ids: Collection[str] | None = None,
+    retained: Collection[str] = (),
 ) -> bool:
     return eligibility(
-        task, unattended=unattended, completed_ids=completed_ids, note=note, open_ids=open_ids
+        task,
+        unattended=unattended,
+        completed_ids=completed_ids,
+        note=note,
+        open_ids=open_ids,
+        retained=retained,
     )[0]
 
 

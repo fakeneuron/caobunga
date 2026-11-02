@@ -104,6 +104,27 @@ def _tasknote_frontmatter(path: Path) -> tuple[str | None, str | None]:
     )
 
 
+def tasknote_touches(text: str) -> list[str]:
+    """The string entries of a tasknote's YAML `touches:` list (CBN-452).
+
+    Skip-not-fail (CBN-EPIC-7.4): no frontmatter, unparseable YAML, or a
+    `touches:` that is not a list yields `[]`, and a non-string entry is
+    dropped. `[]` means undeclared, never "touches nothing" (SPEC §"Tasknote
+    frontmatter"); the one caller only widens a footprint with it.
+    """
+    match = FRONTMATTER.match(text)
+    if not match:
+        return []
+    try:
+        raw = yaml.safe_load(match.group(1))
+    except yaml.YAMLError:
+        return []
+    touches = raw.get("touches") if isinstance(raw, dict) else None
+    if not isinstance(touches, list):
+        return []
+    return [entry.strip() for entry in touches if isinstance(entry, str) and entry.strip()]
+
+
 # Flaitron phase headings (`tasknote-template.md`). The optional leading token
 # is the emoji (`📝`); the name is the remainder after `Phase N:`.
 _PHASE_HEADING = re.compile(

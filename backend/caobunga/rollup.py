@@ -3,14 +3,28 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from caobunga.flaitron import PARENT_EPIC, epic_parent, parse_plan
+from caobunga.digest import run_bullet
+from caobunga.flaitron import (
+    PARENT_EPIC,
+    TASK_ID_BODY,
+    epic_parent,
+    parse_plan,
+    unfenced_comments,
+)
 from caobunga.models import RunRecord, compact_utc, utc_now
 from caobunga.store import Store
 
-ID_RANGE = re.compile(r"\b([A-Z]+)-(\d+)\s*[–-]\s*(\d+)\b")  # noqa: RUF001
+# The start is a whole grammar id, so `CBN-EPIC-16–18` reads as one non-plain id  # noqa: RUF003
+# and is skipped, never as area `EPIC` (CBN-402). Only an en dash may be spaced:
+# a spaced hyphen is the title separator, so `CBN-050 - 2026 rollout` is no
+# 1,977-id range (CBN-408).
+ID_RANGE = re.compile(rf"(?<![\w-])({TASK_ID_BODY})(?:\s*–\s*|-)(\d+)\b")  # noqa: RUF001
+# Title separators in priority order, checked outside range matches (CBN-408).
+TITLE_SEPARATORS = ("—", " – ", " - ")  # noqa: RUF001
 PLAIN_ID = re.compile(r"^([A-Z]+)-(\d+)$")
 
 
@@ -33,22 +47,10 @@ def parse_epic_cohorts(markdown: str) -> list[EpicCohort]:
         if plain is not None:
             by_area_num[(plain.group(1), int(plain.group(2)))] = task.task_id
 
-    for match in ID_RANGE.finditer(markdown):
-        area, start_raw, end_raw = match.group(1), match.group(2), match.group(3)
-        start_s, end_s = int(start_raw), int(end_raw)
-        if end_s < start_s:
-            continue
-        width = max(len(start_raw), len(end_raw))
-        ids = frozenset(
-            _range_member(area, num, width, by_area_num) for num in range(start_s, end_s + 1)
-        )
-        start_token = _range_member(area, start_s, width, by_area_num).partition("-")[2]
-        end_token = _range_member(area, end_s, width, by_area_num).partition("-")[2]
-        key = f"{area}-{start_token}-{end_token}"
-        title = _comment_title(markdown, match.start())
-        if key not in seen_keys:
-            cohorts.append(EpicCohort(key=key, title=title, task_ids=ids))
-            seen_keys.add(key)
+    for cohort in _range_cohorts(markdown, by_area_num):
+        if cohort.key not in seen_keys:
+            cohorts.append(cohort)
+            seen_keys.add(cohort.key)
 
     for task in tasks:
         if PARENT_EPIC.fullmatch(task.task_id) is None:
@@ -71,6 +73,31 @@ def parse_epic_cohorts(markdown: str) -> list[EpicCohort]:
     return cohorts
 
 
+def _range_cohorts(
+    markdown: str,
+    by_area_num: dict[tuple[str, int], str],
+) -> Iterator[EpicCohort]:
+    # Ranges live only in unfenced PLAN comments: one in a task row's prose or
+    # a fenced example is not a cohort declaration (CBN-402).
+    for comment in unfenced_comments(markdown):
+        title = _comment_title(comment)
+        for match in ID_RANGE.finditer(comment):
+            start = PLAIN_ID.fullmatch(match.group(1))
+            if start is None:
+                continue
+            area, start_raw, end_raw = start.group(1), start.group(2), match.group(2)
+            start_s, end_s = int(start_raw), int(end_raw)
+            if end_s < start_s:
+                continue
+            width = max(len(start_raw), len(end_raw))
+            ids = frozenset(
+                _range_member(area, num, width, by_area_num) for num in range(start_s, end_s + 1)
+            )
+            start_token = _range_member(area, start_s, width, by_area_num).partition("-")[2]
+            end_token = _range_member(area, end_s, width, by_area_num).partition("-")[2]
+            yield EpicCohort(key=f"{area}-{start_token}-{end_token}", title=title, task_ids=ids)
+
+
 def _range_member(
     area: str,
     num: int,
@@ -84,17 +111,15 @@ def _range_member(
     return f"{area}-{num:0{width}d}"
 
 
-def _comment_title(markdown: str, range_pos: int) -> str:
-    window = markdown[max(0, range_pos - 200) : range_pos + 80]
-    comment_start = window.rfind("<!--")
-    if comment_start < 0:
-        return "Epic rollup"
-    comment = window[comment_start : window.find("-->", comment_start) + 3]
-    inner = comment[4:-3].strip()
-    if "—" in inner:
-        return inner.split("—", 1)[0].strip()
-    if " - " in inner:
-        return inner.split(" - ", 1)[0].strip()
+def _comment_title(comment: str) -> str:
+    inner = (comment.strip().splitlines() or [""])[0].strip()
+    # A range's own dash is never the separator: `DOC-1 – 5 docs` is not `DOC-1`.  # noqa: RUF003
+    # Non-space filler, so blanking cannot mint a spaced separator beside it.
+    unranged = ID_RANGE.sub(lambda match: "x" * len(match.group(0)), inner)
+    for separator in TITLE_SEPARATORS:
+        cut = unranged.find(separator)
+        if cut != -1:
+            return inner[:cut].strip()
     return inner or "Epic rollup"
 
 
@@ -127,7 +152,7 @@ def format_rollup(project: str, cohort: EpicCohort, runs: list[RunRecord]) -> st
         lines.append("(no run records for this cohort)")
     else:
         for run in runs:
-            lines.append(f"- **{run.task_id}** (`{run.outcome.value}`) — {run.summary.strip()}")
+            lines.append(run_bullet(run))
     return "\n".join(lines).rstrip() + "\n"
 
 

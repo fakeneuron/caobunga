@@ -6,8 +6,10 @@ Pins are a named table — bump cells when CLIs rename; do not bump schema_versi
 
 from __future__ import annotations
 
+import re
 from enum import StrEnum
 
+from caobunga.flaitron.grammar import FRONTIER_TOKENS
 from caobunga.usage import WorkerProvider
 
 
@@ -22,6 +24,9 @@ ALIASES: dict[str, TaskClass] = {
     "light": TaskClass.LIGHT,
     "haiku": TaskClass.LIGHT,
     "medium": TaskClass.MEDIUM,
+    # v7.4.0 renamed the rung `[moderate]`. Legacy `[medium]` stays a read-only
+    # alias of the same class (CBN-416). Candidacy admits both.
+    "moderate": TaskClass.MEDIUM,
     "sonnet": TaskClass.MEDIUM,
     "grok": TaskClass.MEDIUM,
     "codex": TaskClass.MEDIUM,
@@ -43,9 +48,9 @@ ALIASES: dict[str, TaskClass] = {
 # `cursor-agent models` — Cursor's Grok 4.7 ids dropped the `cursor-` prefix the
 # 4.6 generation used, so the live-listed `grok-4.7-*` ids are pinned as-is rather
 # than string-replacing the old `cursor-grok-4.6-*` shape).
-# Grok has no lighter SKU and Codex's tiers are account-gated here (Sol/Astra refused
-# 2026-09-12 on a ChatGPT-account Codex — CONTRACT §"Task-class → model map"), so
-# their rows are flat: the task class picks no distinct model id for them. It is no
+# Grok has no lighter SKU, and Codex pins GPT-6.1 Sol for every class (the flaitron
+# map's Codex column; probe accepted 2026-11-01, CBN-454 — CONTRACT §"Task-class →
+# model map"), so their rows are flat: the task class picks no distinct model id for them. It is no
 # longer *discarded* for them — `EFFORT` below routes the same class to a
 # reasoning-effort rung, which the local adapter passes
 # (claude `--effort`, grok `--reasoning-effort`, codex `-c model_reasoning_effort=`).
@@ -66,9 +71,9 @@ MODELS: dict[str, dict[TaskClass, str]] = {
         TaskClass.HEAVY: "opus",
     },
     WorkerProvider.CODEX: {
-        TaskClass.LIGHT: "gpt-5.6-terra",
-        TaskClass.MEDIUM: "gpt-5.6-terra",
-        TaskClass.HEAVY: "gpt-5.6-terra",
+        TaskClass.LIGHT: "gpt-6.1-sol",
+        TaskClass.MEDIUM: "gpt-6.1-sol",
+        TaskClass.HEAVY: "gpt-6.1-sol",
     },
     WorkerProvider.CURSOR: {
         TaskClass.LIGHT: "composer-2.5",
@@ -82,10 +87,10 @@ MODELS: dict[str, dict[TaskClass, str]] = {
     },
 }
 
-# Provider → task class → reasoning-effort rung, passed to the CLI by `local.build_argv`
+# Provider → task class → reasoning-effort rung, passed to the CLI by `recipes.build_argv`
 # via the recipe's `effort_argv` (CBN-EPIC-15.2). Per-provider since CBN-332: each row is
 # that provider's column of flaitron `docs/PLATFORMS.md` §"Tier x platform map"
-# (as of 2026-10-08). Ladders verified live on 2026-08-26:
+# (v7.4.0, 2026-10-20, CBN-416). Ladders verified live on 2026-08-26:
 #
 #   claude_code  low medium high xhigh max            (`claude --help`)
 #   grok_cli     low medium high xhigh                (its own rejection message)
@@ -93,16 +98,17 @@ MODELS: dict[str, dict[TaskClass, str]] = {
 #
 # claude_code is sonnet@high, opus@medium, opus@high (CBN-331), so light runs a higher
 # rung than medium on purpose: it is a smaller model. grok_cli and codex have flat model
-# ids. grok_cli light takes the upper end of its medium-high range (CBN-360), so light
-# and medium both dispatch high and only heavy (xhigh) differs. codex stays
-# medium/high/xhigh: Terra is pinned flat, and effort is still what separates its
-# classes (CBN-332). Cursor's heavy pin (`grok-4.7-xhigh`, above) bakes in the same
-# rung grok_cli dispatches, and so does its medium pin (`grok-4.7-high`, CBN-333).
+# ids. grok_cli follows the v7.4.0 cells: light `medium`, medium `high`, heavy `xhigh`
+# (CBN-416; CBN-360's shared `high` for light and medium is retired). codex pins
+# `gpt-6.1-sol` (CBN-454) at the map's Sol column — medium / medium / high — so light
+# and medium share a rung and heavy is `high` (CBN-416). Cursor's heavy pin
+# (`grok-4.7-xhigh`, above) bakes in the same rung grok_cli dispatches, and so does its
+# medium pin (`grok-4.7-high`, CBN-333).
 # A v1 provider with no row takes no effort flag.
 # Bump a cell when a vendor's ladder changes; the CONTRACT table is guarded against this one.
 EFFORT: dict[str, dict[TaskClass, str]] = {
     WorkerProvider.GROK: {
-        TaskClass.LIGHT: "high",
+        TaskClass.LIGHT: "medium",
         TaskClass.MEDIUM: "high",
         TaskClass.HEAVY: "xhigh",
     },
@@ -113,13 +119,30 @@ EFFORT: dict[str, dict[TaskClass, str]] = {
     },
     WorkerProvider.CODEX: {
         TaskClass.LIGHT: "medium",
-        TaskClass.MEDIUM: "high",
-        TaskClass.HEAVY: "xhigh",
+        TaskClass.MEDIUM: "medium",
+        TaskClass.HEAVY: "high",
     },
 }
 
 # PLAN tokens that pass through as runtime ids when the provider advertises them.
 CLAUDE_RUNTIME_ALIASES: frozenset[str] = frozenset({"sonnet", "opus"})
+
+# Runner cap (CBN-448, flaitron EXTERNAL-AGENTS step 11): caobunga runs heavy-ceiling
+# families only and never a frontier model, at any effort, because the exclusion is by
+# name. No `MODELS` cell names one; `picker` refuses a registry `model:` pin that does.
+# The model names of the PLAN-row frontier band, minus the `frontier` rung itself.
+FRONTIER_FAMILIES: tuple[str, ...] = tuple(t for t in FRONTIER_TOKENS if t != "frontier")
+_ID_WORD = re.compile(r"[a-z0-9]+")
+
+
+def frontier_family(model_id: str) -> str | None:
+    """The frontier family a runtime model id names, as a case-folded word of the id.
+
+    `claude-fable-5-1` and `gpt-6-astra` match; a word merely containing one
+    (`affable`) does not.
+    """
+    words = set(_ID_WORD.findall(model_id.casefold()))
+    return next((family for family in FRONTIER_FAMILIES if family in words), None)
 
 
 def classify(plan_model: str | None) -> TaskClass:

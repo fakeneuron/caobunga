@@ -10,29 +10,34 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import cast
 
 import pytest
 
 import caobunga.local as local_module
+import caobunga.recipes as recipes_module
 from caobunga.errors import Unlaunchable, UserError, WorkerError
-from caobunga.local import (
+from caobunga.local import LocalWorker
+from caobunga.recipes import (
     CLAUDE_GUARD_SETTINGS,
     EFFORT_SLOT,
     FOREGROUND_HOOK_COMMAND,
     RECIPES,
-    LocalWorker,
     build_argv,
-    compact_stream_line,
     hooks_available,
 )
+from caobunga.text import normalize_terminal_line
 from caobunga.usage import BINARIES, WorkerProvider
 from caobunga.wait import is_usage_limit_line
 from caobunga.worker import STATUS_ERROR, STATUS_EXITED, Session
+from caobunga.worker_log import _TOOL_INPUT_KEYS, RotatingLog, compact_stream_line, tee_stream
 
 _FAKE_PIDS = itertools.count(90000)
+
+# The store home a test hands the adapter when nothing reads it back.
+_HOME = Path("/nonexistent/caobunga-home")
 
 
 class FakeProc:
@@ -105,7 +110,7 @@ def _patch_killpg(monkeypatch: pytest.MonkeyPatch, *procs: FakeProc) -> None:
 
 
 def _worker(spawner: Spawner | None = None) -> LocalWorker:
-    return LocalWorker(spawn=spawner or Spawner(), which=_which)
+    return LocalWorker(home=_HOME, spawn=spawner or Spawner(), which=_which)
 
 
 def _session(
@@ -198,7 +203,7 @@ def test_build_argv_omits_claude_guard_when_hooks_are_missing(
     `worker-exited` rather than as a missing install. Other providers have
     no guard to drop.
     """
-    monkeypatch.setattr(local_module, "hooks_available", lambda: False)
+    monkeypatch.setattr(recipes_module, "hooks_available", lambda: False)
     argv = build_argv("claude", WorkerProvider.CLAUDE, "opus", "GO")
     assert "--settings" not in argv
     assert CLAUDE_GUARD_SETTINGS not in argv
@@ -315,7 +320,7 @@ def test_launch_resolves_the_binary_and_reserves_the_session(tmp_path: Path) -> 
 
 
 def test_launch_refuses_an_uninstalled_provider(tmp_path: Path) -> None:
-    worker = LocalWorker(spawn=Spawner(), which=lambda _name: None)
+    worker = LocalWorker(home=_HOME, spawn=Spawner(), which=lambda _name: None)
     with pytest.raises(Unlaunchable, match="not installed") as excinfo:
         _session(worker, tmp_path, WorkerProvider.GROK)
     assert excinfo.value.exit_code == 5
@@ -524,7 +529,7 @@ def test_close_reaps_every_live_session(tmp_path: Path, monkeypatch: pytest.Monk
     proc = FakeProc(code=None)
     _patch_killpg(monkeypatch, proc)
     spawner = Spawner(proc)
-    with LocalWorker(spawn=spawner, which=_which) as worker:
+    with LocalWorker(home=_HOME, spawn=spawner, which=_which) as worker:
         session = _session(worker, tmp_path, WorkerProvider.GROK)
         worker.send(session, "GO")
     assert proc.terminated
@@ -583,13 +588,66 @@ def test_rotating_log_write_after_close_is_a_safe_no_op(tmp_path: Path) -> None:
     """A tee thread still draining a pipe past `_shutdown_name`'s join timeout
     can call `write_line` after `close()` — it must not raise (CBN-270,
     External review)."""
-    from caobunga.local import _RotatingLog
-
-    log = _RotatingLog(tmp_path / "worker.log")
+    log = RotatingLog(tmp_path / "worker.log")
     log.write_line("before close")
     log.close()
     log.write_line("after close")  # must not raise
     assert "after close" not in (tmp_path / "worker.log").read_text()
+
+
+def test_tee_failure_keeps_draining_and_capturing_output() -> None:
+    """CBN-431: a diagnostic disk failure must not close a live worker pipe."""
+
+    class _FailingLog:
+        def __init__(self) -> None:
+            self.writes = 0
+
+        def write_line(self, _line: str) -> None:
+            self.writes += 1
+            raise OSError("disk full")
+
+    class _Stream:
+        def __init__(self) -> None:
+            self.lines = iter((b"first\n", b"second\n", b""))
+            self.closed = False
+
+        def readline(self) -> bytes:
+            return next(self.lines)
+
+        def close(self) -> None:
+            self.closed = True
+
+    stream = _Stream()
+    captured: list[str] = []
+    log = _FailingLog()
+    tee_stream(stream, log, "stderr", captured.append)  # type: ignore[arg-type]
+    assert captured == ["first", "second"]
+    assert log.writes == 1
+    assert stream.closed
+
+
+def test_log_open_failure_falls_back_to_devnull_before_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CBN-431: a failed diagnostic log open cannot leave a pipe without a tee."""
+    requested_paths: list[Path | None] = []
+
+    def no_space(_path: Path) -> RotatingLog:
+        raise OSError("disk full")
+
+    def spawn(_argv: Sequence[str], _cwd: Path, log_path: Path | None = None) -> FakeProc:
+        requested_paths.append(log_path)
+        return FakeProc(code=0)
+
+    monkeypatch.setattr(local_module, "RotatingLog", no_space)
+    worker = LocalWorker(home=_HOME, spawn=spawn, which=_which)  # type: ignore[arg-type]
+    session = worker.launch(
+        tmp_path, provider=WorkerProvider.GROK, log_path=tmp_path / "worker.log"
+    )
+    worker.send(session, "GO")
+    assert requested_paths == [None]
+    assert worker.stderr_tail(session) == ()
+    worker.shutdown(session)
 
 
 def test_shutdown_closes_the_log_even_while_a_tee_thread_is_still_draining(
@@ -597,7 +655,7 @@ def test_shutdown_closes_the_log_even_while_a_tee_thread_is_still_draining(
 ) -> None:
     """A tee thread still blocked on `readline()` must not keep the log fd
     open forever — `_shutdown_name` closes it regardless, relying on
-    `_RotatingLog` to make a late write from that thread a safe no-op rather
+    `RotatingLog` to make a late write from that thread a safe no-op rather
     than deferring the close (CBN-270, External review)."""
 
     class _BlockingStream:
@@ -637,7 +695,7 @@ def test_shutdown_closes_the_log_even_while_a_tee_thread_is_still_draining(
     monkeypatch.setattr(local_module.os, "killpg", _fake_killpg)
 
     proc = _HangingProc()
-    worker = LocalWorker(spawn=spawn, which=_which)
+    worker = LocalWorker(home=_HOME, spawn=spawn, which=_which)
     session = worker.launch(
         tmp_path,
         provider=WorkerProvider.GROK,
@@ -666,7 +724,7 @@ def test_shutdown_kills_the_whole_process_group_of_a_real_worker() -> None:
     `os.killpg` (CBN-EPIC-243.2) must reach a real worker's grandchildren —
     a timed-out or terminated worker's shells, MCP servers, and test runners
     that today outlive the run record. Mirrors
-    `test_suite_verbs.test_default_run_detaches_stdin_and_kills_the_whole_tree_on_timeout`.
+    `test_spawn.test_run_detached_detaches_stdin_and_kills_the_whole_tree_on_timeout`.
 
     Matched by process-group id, not by a marker string in the command line:
     a marker only `:`-echoed by the *parent* shell would still vanish from
@@ -682,11 +740,11 @@ def test_shutdown_kills_the_whole_process_group_of_a_real_worker() -> None:
         cwd: Path,
         log_path: Path | None = None,
     ) -> subprocess.Popen[bytes]:
-        proc = _default_spawn(["sh", "-c", "sleep 30 & sleep 30 & wait"], cwd, log_path)
+        proc = _default_spawn(["sh", "-c", "sleep 30 & sleep 30 & wait"], cwd, log_path, home=_HOME)
         holder["proc"] = proc
         return proc
 
-    worker = LocalWorker(spawn=spawn, which=_which)
+    worker = LocalWorker(home=_HOME, spawn=spawn, which=_which)
     session = worker.launch(Path.cwd(), provider=WorkerProvider.GROK, session_name="app-CBN-243")
     worker.send(session, "GO")
     pgid = holder["proc"].pid  # `start_new_session=True` makes pid == pgid
@@ -696,16 +754,13 @@ def test_shutdown_kills_the_whole_process_group_of_a_real_worker() -> None:
         listed = subprocess.run(argv, capture_output=True, text=True, check=False)  # noqa: S603
         return len(listed.stdout.split())
 
-    for _ in range(200):
-        if _group_size() >= 3:  # the sh plus both sleep grandchildren
-            break
-        time.sleep(0.01)
-    else:
-        raise AssertionError("worker's grandchildren never started")
+    # the sh plus both sleep grandchildren
+    _poll_until(lambda: _group_size() >= 3, "worker's grandchildren never started")
 
     worker.shutdown(session)
 
-    assert _group_size() == 0, "worker's process group survived shutdown"
+    # `shutdown` waits on the leader only; the signalled grandchildren die just after.
+    _poll_until(lambda: _group_size() == 0, "worker's process group survived shutdown")
 
 
 def test_relaunching_a_live_session_name_is_refused(tmp_path: Path) -> None:
@@ -720,7 +775,7 @@ def test_default_spawn_discards_the_transcript() -> None:
     """stdout/stderr must be DEVNULL — transcripts are never read or stored."""
     from caobunga.local import _default_spawn
 
-    proc = _default_spawn(["/bin/sh", "-c", "echo out; echo err >&2"], Path.cwd())
+    proc = _default_spawn(["/bin/sh", "-c", "echo out; echo err >&2"], Path.cwd(), home=_HOME)
     assert proc.stdout is None
     assert proc.stderr is None
     assert proc.stdin is None
@@ -731,17 +786,19 @@ def test_default_spawn_exports_an_absolute_caobunga_home_to_the_child(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """CBN-251: the worker's hook resolves a relative `$CAOBUNGA_HOME` against its
-    own (project) cwd, not the orchestrator's — so the spawn must export the
-    already-absolute value rather than let a relative one pass through unchanged."""
+    own (project) cwd, not the orchestrator's — so the spawn must export the home
+    it is handed made absolute here, never a relative one, and under `store`'s
+    own `ENV_HOME` name (the adapter restates it to stay off `store`)."""
     from caobunga.local import _default_spawn
-    from caobunga.store import ENV_HOME, default_home
+    from caobunga.store import ENV_HOME
 
-    monkeypatch.setenv(ENV_HOME, "relative-home")
-    expected = str(default_home())
+    monkeypatch.setenv(ENV_HOME, "some-other-home")
+    expected = str(Path.cwd() / "relative-home")
     proc = _default_spawn(
         [sys.executable, "-c", f"import os; print(os.environ[{ENV_HOME!r}])"],
         tmp_path,
         tmp_path / "spawn.log",
+        home=Path("relative-home"),
     )
     assert proc.stdout is not None
     out = proc.stdout.read().decode().strip()
@@ -759,27 +816,29 @@ def test_default_spawn_strips_malloc_stack_logging_keys_from_the_child_env(
     """CBN-379: a `MallocStackLogging*` key in the orchestrator's environment must not
     reach the worker (or the hooks it spawns); unrelated keys and `CAOBUNGA_HOME` stay."""
     from caobunga.local import _default_spawn
-    from caobunga.store import ENV_HOME, default_home
+    from caobunga.store import ENV_HOME
 
     for key in ("MallocStackLogging", "MallocStackLoggingNoCompact", "MallocStackLoggingDirectory"):
         monkeypatch.setenv(key, "1")
     monkeypatch.setenv("MallocScribble", "1")
     monkeypatch.setenv("CBN_379_KEEP", "kept")
     code = "import json, os; print(json.dumps(dict(os.environ)))"
-    proc = _default_spawn([sys.executable, "-c", code], tmp_path, tmp_path / "spawn.log")
+    proc = _default_spawn(
+        [sys.executable, "-c", code], tmp_path, tmp_path / "spawn.log", home=tmp_path / "home"
+    )
     out, _ = proc.communicate(timeout=10)
     child_env = json.loads(out.decode())
     assert not [key for key in child_env if key.startswith("MallocStackLogging")]
     assert child_env["MallocScribble"] == "1"
     assert child_env["CBN_379_KEEP"] == "kept"
-    assert child_env[ENV_HOME] == str(default_home())
+    assert child_env[ENV_HOME] == str(tmp_path / "home")
 
 
 def test_default_spawn_reports_a_missing_binary(tmp_path: Path) -> None:
     from caobunga.local import _default_spawn
 
     with pytest.raises(WorkerError):
-        _default_spawn([str(tmp_path / "no-such-binary")], tmp_path)
+        _default_spawn([str(tmp_path / "no-such-binary")], tmp_path, home=_HOME)
 
 
 def test_default_spawn_pipes_stdio_when_a_log_path_is_given(tmp_path: Path) -> None:
@@ -787,7 +846,10 @@ def test_default_spawn_pipes_stdio_when_a_log_path_is_given(tmp_path: Path) -> N
     from caobunga.local import _default_spawn
 
     proc = _default_spawn(
-        ["/bin/sh", "-c", "echo out; echo err >&2"], Path.cwd(), tmp_path / "worker.log"
+        ["/bin/sh", "-c", "echo out; echo err >&2"],
+        Path.cwd(),
+        tmp_path / "worker.log",
+        home=_HOME,
     )
     assert proc.stdout is not None
     assert proc.stderr is not None
@@ -796,32 +858,33 @@ def test_default_spawn_pipes_stdio_when_a_log_path_is_given(tmp_path: Path) -> N
     proc.stderr.close()
 
 
-def _wait_exited(worker: LocalWorker, session: Session, *, attempts: int = 200) -> None:
-    for _ in range(attempts):
-        if worker.exit_code(session) is not None:
-            return
+def test_default_spawn_exports_the_home_the_worker_was_built_with(tmp_path: Path) -> None:
+    """CBN-401: `LocalWorker(home=)` reaches the default spawn — the adapter takes
+    the store home rather than reading `store.default_home()` itself."""
+    stub = tmp_path / "grok"
+    stub.write_text('#!/bin/sh\nprintf "%s\\n" "$CAOBUNGA_HOME"\n')
+    stub.chmod(0o755)
+    home = tmp_path / "store-home"
+    with LocalWorker(home=home, which=lambda _name: str(stub)) as worker:
+        session = worker.launch(
+            tmp_path, provider=WorkerProvider.GROK, log_path=tmp_path / "worker.log"
+        )
+        worker.send(session, "GO")
+        _wait_exited(worker, session)
+        assert worker.stdout_tail(session) == (str(home),)
+
+
+def _poll_until(ready: Callable[[], bool], what: str, *, timeout: float = 10.0) -> None:
+    """Poll against a wall-clock deadline: a fixed attempt count flaked under load (CBN-423)."""
+    deadline = time.monotonic() + timeout
+    while not ready():
+        if time.monotonic() > deadline:
+            raise AssertionError(what)
         time.sleep(0.01)
-    raise AssertionError("process never exited")
 
 
-def _wait_last_stderr(worker: LocalWorker, session: Session, *, attempts: int = 200) -> str:
-    """Exit alone doesn't prove the tee thread has drained the pipe yet."""
-    for _ in range(attempts):
-        tail = worker.stderr_tail(session)
-        if tail:
-            return tail[-1]
-        time.sleep(0.01)
-    raise AssertionError("no stderr line ever captured")
-
-
-def _wait_last_stdout(worker: LocalWorker, session: Session, *, attempts: int = 200) -> str:
-    """Exit alone doesn't prove the tee thread has drained the pipe yet."""
-    for _ in range(attempts):
-        tail = worker.stdout_tail(session)
-        if tail:
-            return tail[-1]
-        time.sleep(0.01)
-    raise AssertionError("no stdout line ever captured")
+def _wait_exited(worker: LocalWorker, session: Session) -> None:
+    _poll_until(lambda: worker.exit_code(session) is not None, "process never exited")
 
 
 def test_send_tees_stdout_and_stderr_to_the_log_path(tmp_path: Path) -> None:
@@ -846,7 +909,7 @@ def test_send_tees_stdout_and_stderr_to_the_log_path(tmp_path: Path) -> None:
             stderr=stdio,
         )
 
-    worker = LocalWorker(spawn=spawn, which=_which)
+    worker = LocalWorker(home=_HOME, spawn=spawn, which=_which)
     log_path = tmp_path / "logs" / "20260101T000000000Z-CBN-162.log"
     session = worker.launch(
         tmp_path,
@@ -856,8 +919,9 @@ def test_send_tees_stdout_and_stderr_to_the_log_path(tmp_path: Path) -> None:
     )
     worker.send(session, "GO")
     _wait_exited(worker, session)
-    assert _wait_last_stderr(worker, session) == "err"
-    assert _wait_last_stdout(worker, session) == "out"
+    # Once the process has exited, the tail accessors join the tee threads (CBN-282).
+    assert worker.stderr_tail(session)[-1] == "err"
+    assert worker.stdout_tail(session)[-1] == "out"
     worker.shutdown(session)
     contents = log_path.read_text()
     assert "[stdout] out" in contents
@@ -883,7 +947,7 @@ def test_send_keeps_a_bounded_ordered_tail_per_stream(tmp_path: Path) -> None:
             stderr=subprocess.PIPE,
         )
 
-    worker = LocalWorker(spawn=spawn, which=_which)
+    worker = LocalWorker(home=_HOME, spawn=spawn, which=_which)
     session = worker.launch(
         tmp_path,
         provider=WorkerProvider.GROK,
@@ -892,14 +956,93 @@ def test_send_keeps_a_bounded_ordered_tail_per_stream(tmp_path: Path) -> None:
     )
     worker.send(session, "GO")
     _wait_exited(worker, session)
-    for _ in range(200):
-        last = worker.stderr_tail(session)[-1:]
-        if last == (f"e{TAIL_LINES + 1}",) and worker.stdout_tail(session):
-            break
-        time.sleep(0.01)
     assert worker.stderr_tail(session) == tuple(f"e{i}" for i in range(2, TAIL_LINES + 2))
     assert worker.stdout_tail(session) == ("o",)
     worker.shutdown(session)
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ("Error: usage \x1b[1mlimit\x1b[0m reached", "Error: usage limit reached"),
+        ("Error: usage \x1b]8;;https://example.test\x07limit\x1b]8;;\x07", "Error: usage limit"),
+        ("usage \x1b]8;;https://example.test\x1b\\limit\x1b]8;;\x1b\\", "usage limit"),
+        ("us\x1b(Bage limit", "usage limit"),
+        ("usage\x1b[Climit", "usage limit"),
+        ("usage\x1b[12Climit", "usage limit"),
+        ("usage\x1b[0Climit", "usage limit"),
+        ("usage\x9b2Climit", "usage limit"),
+        ("usage \x9d8;;https://example.test\x9climit\x9d8;;\x9c", "usage limit"),
+        ("usage\u00a0limit", "usage limit"),
+        ("  usage  \t limit  ", "usage limit"),
+        ("usage\x1b[2K limit", "usage limit"),
+        ("ordinary  output", "ordinary output"),
+        ("\x1b]0;usage limit\x07rate limit 429", "rate limit 429"),
+    ],
+)
+def test_tail_capture_normalizes_terminal_lines(line: str, expected: str) -> None:
+    assert normalize_terminal_line(line) == expected
+    assert is_usage_limit_line(normalize_terminal_line(line)) == ("usage limit" in expected)
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ("Error: USAGE LIMIT reached", True),
+        ("usage-limit", True),
+        ("session limit", True),
+        ("session-limit", True),
+        ("out of extra usage", True),
+        ("You've hit your limit", True),
+        ("quota exceeded", True),
+        ("quota has been reached", True),
+        ("usage balance exhausted", True),
+        ("payment required", True),
+        ("prefixusage limit", True),  # historical substring semantics
+        ("", False),
+        ("rate limit 429", False),
+        ("rate-limit: rejected five_hour", False),
+        ("usage", False),
+        ("limit", False),
+        ("usagelimit", False),
+    ],
+)
+def test_is_usage_limit_line(line: str, expected: bool) -> None:
+    """The closed marker list consumes normalized lines, without broadening 429s."""
+    assert is_usage_limit_line(line) is expected
+
+
+@pytest.mark.parametrize("provider", [WorkerProvider.GROK, WorkerProvider.CLAUDE])
+def test_both_tails_normalize_after_compaction_and_preserve_log(
+    tmp_path: Path, provider: str
+) -> None:
+    from caobunga.local import TAIL_LINES
+
+    raw = "  Error: usage\x1b[3C\x1b]8;;https://example.test\x07limit\x1b]8;;\x07\u00a0reached  "
+    lines = [f"before{i}" for i in range(TAIL_LINES)] + [raw] + ["\x1b[0m\t"] * TAIL_LINES
+    stdout_lines = (
+        [_event(type="result", result="\n".join(lines))]
+        if provider == WorkerProvider.CLAUDE
+        else lines
+    )
+    proc = FakeProc(code=1)
+    proc.stdout = _LaggingStream([f"{ln}\n".encode() for ln in stdout_lines], lag=0)  # type: ignore[attr-defined]
+    proc.stderr = _LaggingStream([f"{ln}\n".encode() for ln in lines], lag=0)  # type: ignore[attr-defined]
+    log_path = tmp_path / "w.log"
+    with LocalWorker(home=_HOME, spawn=Spawner(proc), which=_which) as worker:
+        session = worker.launch(tmp_path, provider=provider, log_path=log_path)
+        worker.send(session, "GO")
+        expected = (
+            *(f"before{i}" for i in range(1, TAIL_LINES)),
+            "Error: usage limit reached",
+        )
+        assert worker.stdout_tail(session) == expected
+        assert worker.stderr_tail(session) == expected
+        assert is_usage_limit_line(worker.stdout_tail(session)[-1])
+        log = log_path.read_text()
+        assert f"[stdout] {raw}\n" in log
+        assert f"[stderr] {raw}\n" in log
+        assert log.count("\x1b[0m\t\n") == TAIL_LINES * 2
 
 
 class _LaggingStream:
@@ -924,7 +1067,7 @@ def test_tail_read_right_after_exit_waits_for_the_tee_to_drain(tmp_path: Path) -
     proc.stderr = _LaggingStream(  # type: ignore[attr-defined]
         [b"Internal error: {\n", b'"message": "usage balance exhausted"\n', b"}\n"], lag=0.2
     )
-    worker = LocalWorker(spawn=Spawner(proc), which=_which)
+    worker = LocalWorker(home=_HOME, spawn=Spawner(proc), which=_which)
     session = worker.launch(
         tmp_path,
         provider=WorkerProvider.GROK,
@@ -946,10 +1089,8 @@ def test_send_without_a_log_path_leaves_both_tails_empty(tmp_path: Path) -> None
 
 
 def test_rotating_log_rotates_once_past_its_cap(tmp_path: Path) -> None:
-    from caobunga.local import _RotatingLog
-
     path = tmp_path / "worker.log"
-    log = _RotatingLog(path, max_bytes=10)
+    log = RotatingLog(path, max_bytes=10)
     log.write_line("first line")
     log.write_line("second line")
     log.close()
@@ -986,6 +1127,7 @@ def test_compact_logs_one_line_per_tool_call_and_assistant_message() -> None:
     assert compact_stream_line(line) == (
         ["tool: Bash echo hi", "tool: Edit a.py", "tool: TodoWrite", "assistant: done really"],
         [],
+        ["tool: Bash echo", "tool: Edit a.py", "tool: TodoWrite"],
     )
 
 
@@ -995,22 +1137,123 @@ def test_compact_drops_successful_tool_results_and_logs_errors() -> None:
         {"type": "tool_result", "is_error": True, "content": [{"type": "text", "text": "boom"}]},
         role="user",
     )
-    assert compact_stream_line(ok) == ([], [])
-    assert compact_stream_line(bad) == (["tool-error: boom"], [])
+    assert compact_stream_line(ok) == ([], [], [])
+    assert compact_stream_line(bad) == (["tool-error: boom"], [], [])
+
+
+def test_activity_counts_tool_lines_from_the_progress_trail_only(tmp_path: Path) -> None:
+    """CBN-EPIC-449.3: tool calls counted, last one kept normalized; text, errors, tail never."""
+    stdout_lines = [
+        _assistant({"type": "text", "text": "thinking about usage limit"}),
+        _assistant({"type": "tool_use", "name": "Read", "input": {"file_path": "a.py"}}),
+        _assistant(
+            {"type": "tool_result", "is_error": True, "content": "boom"},
+            role="user",
+        ),
+        _assistant(
+            {"type": "tool_use", "name": "Bash", "input": {"command": "\x1b[31mecho\x1b[0m red"}}
+        ),
+        _event(type="result", subtype="success", result="Closed."),
+    ]
+    proc = FakeProc(code=0)
+    proc.stdout = _LaggingStream([f"{ln}\n".encode() for ln in stdout_lines], lag=0)  # type: ignore[attr-defined]
+    proc.stderr = _LaggingStream([b"tool: Fake stderr\n"], lag=0)  # type: ignore[attr-defined]
+    with LocalWorker(home=_HOME, spawn=Spawner(proc), which=_which) as worker:
+        session = worker.launch(
+            tmp_path, provider=WorkerProvider.CLAUDE, log_path=tmp_path / "w.log"
+        )
+        assert worker.activity(session) == (0, None)
+        worker.send(session, "GO")
+        assert worker.stdout_tail(session) == ("Closed.",)  # joins the tee threads
+        assert worker.activity(session) == (2, "tool: Bash echo")
+
+
+@pytest.mark.parametrize(
+    ("tool", "expected"),
+    [
+        (
+            {"name": "Bash", "input": {"command": 'curl -H "Authorization: Bearer s3cret" x'}},
+            "tool: Bash curl",
+        ),
+        ({"name": "Bash", "input": {"command": "TOKEN=s3cret A=b uv run"}}, "tool: Bash uv"),
+        ({"name": "Bash", "input": {"command": "export TOKEN=s3cret"}}, "tool: Bash export"),
+        ({"name": "Bash", "input": {"command": "TOKEN=s3cret"}}, "tool: Bash"),
+        ({"name": "Bash", "input": {"command": 'KEY="a b c" curl'}}, "tool: Bash"),
+        ({"name": "Bash", "input": {"command": "KEY='a b' curl"}}, "tool: Bash"),
+        ({"name": "Bash", "input": {"command": "(TOKEN=s3cret curl x)"}}, "tool: Bash"),
+        ({"name": "Bash", "input": {"command": "KEY+=s3cret cmd"}}, "tool: Bash"),
+        ({"name": "Bash", "input": {"command": "KEY=$(cat f) cmd"}}, "tool: Bash"),
+        (
+            {"name": "Bash", "input": {"command": "./scripts/run.sh --token s3"}},
+            "tool: Bash ./scripts/run.sh",
+        ),
+        ({"name": "Bash", "input": {}}, "tool: Bash"),
+        ({"name": "Bash", "input": {"command": "", "description": "Run tests"}}, "tool: Bash"),
+        ({"name": "Edit", "input": {"file_path": "TOKEN=a.py b"}}, "tool: Edit TOKEN=a.py b"),
+        ({"name": "Read", "input": {"file_path": "src/a.py"}}, "tool: Read src/a.py"),
+        ({"name": "Read", "input": {"file_path": "a.py\b\bevil\x1b"}}, "tool: Read a.pyevil"),
+        (
+            {"name": "Write", "input": {"file_path": "b.md", "content": "s3cret"}},
+            "tool: Write b.md",
+        ),
+        (
+            {"name": "NotebookEdit", "input": {"notebook_path": "n.ipynb", "new_source": "s3"}},
+            "tool: NotebookEdit n.ipynb",
+        ),
+        ({"name": "Glob", "input": {"pattern": "**/*.py", "path": "src"}}, "tool: Glob src"),
+        ({"name": "Glob", "input": {"pattern": "s3cret*"}}, "tool: Glob"),
+        ({"name": "Grep", "input": {"pattern": "s3cret", "path": "src"}}, "tool: Grep"),
+        ({"name": "WebFetch", "input": {"url": "https://x.test/?token=s3cret"}}, "tool: WebFetch"),
+        ({"name": "Monitor", "input": {"command": "curl -H s3cret"}}, "tool: Monitor"),
+        ({"name": "PowerShell", "input": {"command": "Set-Secret s3cret"}}, "tool: PowerShell"),
+        ({"name": "mcp__neon__run_sql", "input": {"sql": "s3cret"}}, "tool: mcp__neon__run_sql"),
+        ({"name": "Task", "input": {"description": "s3cret job"}}, "tool: Task"),
+    ],
+)
+def test_activity_redacts_each_tool_target(
+    tmp_path: Path, tool: dict[str, object], expected: str
+) -> None:
+    """CBN-455/458: Bash keeps its program, a file tool its path, any other tool its name;
+    the log keeps the full call."""
+    proc = FakeProc(code=0)
+    line = _assistant({"type": "tool_use", **tool})
+    proc.stdout = _LaggingStream([f"{line}\n".encode()], lag=0)  # type: ignore[attr-defined]
+    proc.stderr = _LaggingStream([], lag=0)  # type: ignore[attr-defined]
+    log_path = tmp_path / "w.log"
+    with LocalWorker(home=_HOME, spawn=Spawner(proc), which=_which) as worker:
+        session = worker.launch(tmp_path, provider=WorkerProvider.CLAUDE, log_path=log_path)
+        worker.send(session, "GO")
+        worker.stdout_tail(session)  # joins the tee threads
+        assert worker.activity(session) == (1, expected)
+    params = tool["input"] if isinstance(tool["input"], dict) else {}
+    detail = next((params[key] for key in _TOOL_INPUT_KEYS if params.get(key)), "")
+    assert f"tool: {tool['name']} {' '.join(str(detail).split())}".rstrip() in log_path.read_text()
+
+
+def test_activity_stays_empty_without_a_compacted_stream(tmp_path: Path) -> None:
+    """A raw recipe never produces `tool:` progress lines, even if its stdout says `tool:`."""
+    proc = FakeProc(code=0)
+    proc.stdout = _LaggingStream([b"tool: Bash ls\n"], lag=0)  # type: ignore[attr-defined]
+    proc.stderr = _LaggingStream([], lag=0)  # type: ignore[attr-defined]
+    with LocalWorker(home=_HOME, spawn=Spawner(proc), which=_which) as worker:
+        session = worker.launch(tmp_path, provider=WorkerProvider.GROK, log_path=tmp_path / "w.log")
+        worker.send(session, "GO")
+        assert worker.stdout_tail(session) == ("tool: Bash ls",)
+        assert worker.activity(session) == (0, None)
 
 
 def test_compact_tails_only_the_result_text_verbatim_line_by_line() -> None:
     """The lines text mode printed, so the CBN-200/292 stdout pick reads the same tail."""
     line = _event(type="result", subtype="success", is_error=False, result="Closed.\nFollow-up: x")
-    assert compact_stream_line(line) == (["result: success"], ["Closed.", "Follow-up: x"])
+    assert compact_stream_line(line) == (["result: success"], ["Closed.", "Follow-up: x"], [])
     quiet = _event(type="result", subtype="success", is_error=False)
-    assert compact_stream_line(quiet) == (["result: success"], [])
+    assert compact_stream_line(quiet) == (["result: success"], [], [])
 
 
 def test_compact_tails_an_error_result_without_text() -> None:
     """Text mode printed an error line for max-turns; the stdout diagnostic must survive."""
     empty = _event(type="result", subtype="error_max_turns", is_error=True)
-    assert compact_stream_line(empty) == ([], ["result: error_max_turns (error)"])
+    assert compact_stream_line(empty) == ([], ["result: error_max_turns (error)"], [])
 
 
 def test_compact_keeps_a_truncated_event_out_of_the_tail() -> None:
@@ -1018,14 +1261,14 @@ def test_compact_keeps_a_truncated_event_out_of_the_tail() -> None:
     cut = _assistant(
         {"type": "tool_result", "is_error": True, "content": "usage limit docs"}, role="user"
     )[:40]
-    progress, tail = compact_stream_line(cut)
+    progress, tail, _ = compact_stream_line(cut)
     assert progress == [cut]
     assert tail == []
 
 
 def test_compact_logs_a_string_content_message() -> None:
     line = _event(type="user", message={"role": "user", "content": "GO"})
-    assert compact_stream_line(line) == (["user: GO"], [])
+    assert compact_stream_line(line) == (["user: GO"], [], [])
 
 
 def test_compact_keeps_a_usage_limit_refusal_classifiable() -> None:
@@ -1033,7 +1276,7 @@ def test_compact_keeps_a_usage_limit_refusal_classifiable() -> None:
     line = _event(
         type="result", subtype="success", is_error=True, result="You've hit your limit · resets 3pm"
     )
-    _, tail = compact_stream_line(line)
+    _, tail, _ = compact_stream_line(line)
     assert any(is_usage_limit_line(k) for k in tail)
 
 
@@ -1043,29 +1286,33 @@ def test_compact_never_tails_a_tool_call_that_names_a_usage_limit() -> None:
         {"type": "tool_use", "name": "Bash", "input": {"command": 'grep -n "usage limit" a.py'}},
         {"type": "text", "text": "I cannot find the session limit handling"},
     )
-    progress, tail = compact_stream_line(line)
+    progress, tail, _ = compact_stream_line(line)
     assert any(is_usage_limit_line(p) for p in progress)
     assert tail == []
 
 
-def test_compact_drops_allowed_rate_limit_events_and_logs_the_rest() -> None:
+@pytest.mark.parametrize("status", ["rejected", "allowed_warning", "unknown"])
+@pytest.mark.parametrize("limit_type", ["five_hour", "seven_day", "requests"])
+def test_compact_drops_allowed_rate_limit_events_and_logs_the_rest(
+    status: str, limit_type: str
+) -> None:
     allowed = _event(type="rate_limit_event", rate_limit_info={"status": "allowed"})
     rejected = _event(
         type="rate_limit_event",
-        rate_limit_info={"status": "rejected", "rateLimitType": "five_hour"},
+        rate_limit_info={"status": status, "rateLimitType": limit_type},
     )
-    assert compact_stream_line(allowed) == ([], [])
-    assert compact_stream_line(rejected) == (["rate-limit: rejected five_hour"], [])
+    assert compact_stream_line(allowed) == ([], [], [])
+    assert compact_stream_line(rejected) == ([f"rate-limit: {status} {limit_type}"], [], [])
 
 
 def test_compact_passes_non_json_lines_through_to_the_tail() -> None:
     """A CLI error printed before streaming starts is plain text."""
     error = "Error: When using --print, --output-format=stream-json requires --verbose"
-    assert compact_stream_line(error) == ([], [error])
-    assert compact_stream_line("[1, 2]") == ([], ["[1, 2]"])
-    assert compact_stream_line("[" * 100_000) == ([], ["[" * 100_000])
-    assert compact_stream_line(_event(type="system", subtype="init")) == (["system: init"], [])
-    assert compact_stream_line(_event(type="mystery")) == (["event: mystery"], [])
+    assert compact_stream_line(error) == ([], [error], [])
+    assert compact_stream_line("[1, 2]") == ([], ["[1, 2]"], [])
+    assert compact_stream_line("[" * 100_000) == ([], ["[" * 100_000], [])
+    assert compact_stream_line(_event(type="system", subtype="init")) == (["system: init"], [], [])
+    assert compact_stream_line(_event(type="mystery")) == (["event: mystery"], [], [])
 
 
 class _GatedStream:
@@ -1095,16 +1342,14 @@ def test_stream_json_progress_reaches_the_log_while_the_worker_runs(
     proc.stdout = stdout  # type: ignore[attr-defined]
     proc.stderr = _LaggingStream([], lag=0)  # type: ignore[attr-defined]
     _patch_killpg(monkeypatch, proc)
-    worker = LocalWorker(spawn=Spawner(proc), which=_which)
+    worker = LocalWorker(home=_HOME, spawn=Spawner(proc), which=_which)
     log_path = tmp_path / "w.log"
     session = worker.launch(
         tmp_path, provider=WorkerProvider.CLAUDE, session_name="app-live", log_path=log_path
     )
     worker.send(session, "GO")
-    for _ in range(200):
-        if log_path.read_text():
-            break
-        time.sleep(0.01)
+    # Below `_GatedStream`'s 10s self-release, or the result line could land first.
+    _poll_until(lambda: bool(log_path.read_text()), "worker log never written", timeout=5.0)
     assert worker.exit_code(session) is None
     assert log_path.read_text() == "[stdout] tool: Bash just test\n"
     stdout.release.set()
@@ -1121,7 +1366,7 @@ def test_a_non_streaming_recipe_tees_stdout_raw(tmp_path: Path) -> None:
     proc = FakeProc(code=0)
     proc.stdout = _LaggingStream([b'{"type": "result", "result": "x"}\n'], lag=0)  # type: ignore[attr-defined]
     proc.stderr = _LaggingStream([], lag=0)  # type: ignore[attr-defined]
-    worker = LocalWorker(spawn=Spawner(proc), which=_which)
+    worker = LocalWorker(home=_HOME, spawn=Spawner(proc), which=_which)
     session = worker.launch(
         tmp_path, provider=WorkerProvider.GROK, session_name="app-raw", log_path=tmp_path / "w.log"
     )

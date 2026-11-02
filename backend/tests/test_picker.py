@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from caobunga.picker import PickReason, ProviderUnavailable, pick
+from caobunga.taskmap import resolve
 from caobunga.usage import Leftover, ProviderUsage, WorkerProvider
 
 
@@ -31,10 +32,10 @@ def test_unknown_leftover_picks_first_installed_v1() -> None:
         _row("cursor_cli"),
     ]
     chosen = pick("medium", usage=usage)
-    assert chosen.provider == WorkerProvider.GROK
-    assert chosen.model == "grok-4.7"
+    assert chosen.provider == WorkerProvider.CODEX
+    assert chosen.model == resolve("medium", "codex")
     assert chosen.reason is PickReason.INSTALLED
-    assert chosen.why == "installed provider=grok_cli leftover=unknown model=grok-4.7"
+    assert chosen.why == "installed provider=codex leftover=unknown model=gpt-6.1-sol"
 
 
 def test_skips_missing_binary_then_v1_order() -> None:
@@ -142,10 +143,36 @@ def test_model_override_requires_provider() -> None:
     assert not isinstance(excinfo.value, ProviderUnavailable)
 
 
+@pytest.mark.parametrize("model", ["fable", "claude-Fable-5-1", "mythos", "gpt-6-astra"])
+def test_frontier_model_pin_is_refused_as_a_usage_error(model: str) -> None:
+    """CBN-448 runner cap: a registry `model:` pin never launches a frontier model.
+
+    A plain `ValueError`, not `ProviderUnavailable`, so the loop maps it to exit 2.
+    """
+    usage = [_row("claude_code"), _row("codex")]
+    provider = "codex" if "astra" in model else "claude_code"
+    with pytest.raises(ValueError, match="frontier family") as excinfo:
+        pick("heavy", provider=provider, model=model, usage=usage)
+    assert not isinstance(excinfo.value, ProviderUnavailable)
+
+
+def test_frontier_model_pin_outranks_an_uninstalled_provider() -> None:
+    """Review fix: the registration error (exit 2) wins over machine state (exit 5)."""
+    usage = [_row("codex", installed=False)]
+    with pytest.raises(ValueError, match="frontier family") as excinfo:
+        pick("heavy", provider="codex", model="gpt-6-astra", usage=usage)
+    assert not isinstance(excinfo.value, ProviderUnavailable)
+
+
+def test_heavy_ceiling_model_pin_still_launches() -> None:
+    chosen = pick("heavy", provider="codex", model="gpt-6.1-sol", usage=[_row("codex")])
+    assert chosen.model == "gpt-6.1-sol"
+
+
 def test_blank_override_is_treated_as_omit() -> None:
     usage = [_row("grok_cli"), _row("claude_code")]
     chosen = pick("medium", provider="  ", model="", usage=usage)
-    assert chosen.provider == WorkerProvider.GROK
+    assert chosen.provider == WorkerProvider.CLAUDE
     assert chosen.reason is PickReason.INSTALLED
 
 
@@ -183,9 +210,16 @@ def test_live_probe_all_blocked_without_injection() -> None:
 # --- Provider allow-list (CBN-091) ---
 
 
+def test_default_order_is_codex_then_claude_then_grok() -> None:
+    usage = [_row("grok_cli"), _row("claude_code"), _row("codex")]
+    assert pick("medium", usage=usage).provider == WorkerProvider.CODEX
+    assert pick("medium", usage=usage[:2]).provider == WorkerProvider.CLAUDE
+    assert pick("medium", usage=usage[:1]).provider == WorkerProvider.GROK
+
+
 def test_allow_list_restricts_and_orders_when_all_unknown() -> None:
-    # The CBN-EPIC-9.4 case: every DUMP_ARGV is None, so V1_PROVIDERS order would
-    # hand this to grok_cli. The declared order must win instead.
+    # The CBN-EPIC-9.4 case: every DUMP_ARGV is None, so PICK_ORDER would
+    # hand this to codex. The declared order must win instead.
     usage = [
         _row("grok_cli"),
         _row("claude_code"),
@@ -258,8 +292,8 @@ def test_allow_list_member_absent_from_usage_rows_is_skipped() -> None:
 
 def test_empty_allow_list_is_treated_as_undeclared() -> None:
     usage = [_row("grok_cli"), _row("claude_code")]
-    assert pick("medium", providers=[], usage=usage).provider == WorkerProvider.GROK
-    assert pick("medium", providers=["  "], usage=usage).provider == WorkerProvider.GROK
+    assert pick("medium", providers=[], usage=usage).provider == WorkerProvider.CLAUDE
+    assert pick("medium", providers=["  "], usage=usage).provider == WorkerProvider.CLAUDE
 
 
 def test_allow_list_dedupes_keeping_first_position() -> None:

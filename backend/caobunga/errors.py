@@ -93,3 +93,37 @@ class ReportError(UserError):
     def __init__(self, message: str, record: RunRecord) -> None:
         super().__init__(message, exit_code=4)
         self.record = record
+
+
+# The first line `run` prints when its receipt cannot be written; `fleet` reads it.
+RECEIPT_UNWRITTEN_PREFIX = "invocation-record-unwritten: "
+
+
+class ReceiptUnwritten(UserError):
+    """The invocation receipt itself could not be written, e.g. a full disk (CBN-442). Exit 4.
+
+    No receipt can name this, so the message is the record: a marker line with
+    the OS reason, what the run had already stopped on, then the recovery. A
+    checkpoint written before the failure stays `running` until the next run on
+    the repo reconciles it (CBN-376). `record` is the last run record written,
+    for the CLI to dump as it does a `ReportError`'s.
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        *,
+        stopped: BaseException | None = None,
+        record: RunRecord | None = None,
+    ) -> None:
+        lines = [f"{RECEIPT_UNWRITTEN_PREFIX}{reason}"]
+        if stopped is not None:
+            detail = f": {stopped}" if str(stopped) else ""
+            lines.append(f"stopped first: {type(stopped).__name__}{detail}")
+        lines.append(
+            "recovery: fix what stopped the write (a full disk, the home's permissions), "
+            "then rerun; the next run on this repo reconciles any receipt this run left `running`"
+        )
+        super().__init__("\n".join(lines), exit_code=4)
+        self.reason = reason
+        self.record = record

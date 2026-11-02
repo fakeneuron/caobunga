@@ -1,0 +1,596 @@
+# Changelog
+
+Each section lists the tasks closed since the previous release, by task ID and short name.
+
+## 0.3.0 — 2026-11-02
+
+- CBN-460 contract-budget-headroom
+- CBN-461 skill-proceed-on-green
+- CBN-462 contract-payload-shape-count
+- CBN-463 readme-digest-route
+- CBN-464 vision-three-surfaces
+- CBN-459 park-commit-gaps
+- CBN-446 retire-park-commit-cue
+- CBN-454 codex-sol-access
+- CBN-457 footprint-split-hardening
+- CBN-458 heartbeat-structured-redact
+- CBN-455 heartbeat-secret-guard
+- CBN-451 triage-v8.2-mirror
+- CBN-453 run-record-effort
+- CBN-456 remeasure-heartbeat
+- CBN-452 tree-after-foreign-attribution
+- CBN-EPIC-449 live-run-feedback
+- CBN-EPIC-449.1 live-run-feedback discovery
+- CBN-EPIC-449.2 run-heartbeat
+- CBN-EPIC-449.3 worker-activity-echo
+- CBN-EPIC-449.4 tty-styling
+- CBN-EPIC-449.5 suite-heartbeat
+- CBN-EPIC-449.N live-run-feedback audit
+- CBN-EPIC-450 worktree-dispatch
+- CBN-EPIC-450.1 worktree-dispatch discovery
+- CBN-EPIC-450.2 worktree-lifecycle
+- CBN-EPIC-450.3 worktree-bootstrap
+- CBN-EPIC-450.4 worktree-run-and-land
+- CBN-EPIC-450.5 isolated-park-drain
+- CBN-EPIC-450.6 worktree-recovery-report
+- CBN-EPIC-450.N worktree-dispatch audit
+- CBN-448 flaitron-caller-contract
+- CBN-447 export-scan-placeholder-path
+- CBN-445 upstream-park-commit
+- CBN-441 ui-fleet-glance
+- CBN-440 ui-coverage-triage
+- CBN-439 ui-run-record-signals
+- CBN-443 park-and-continue
+- CBN-444 stale-running-reconcile
+- CBN-442 fleet-stranded-legs
+- CBN-438 ui-contrast
+- CBN-437 ci-pytest-repair
+- CBN-433 guard-induction-trial
+- CBN-436 escalation-new-rows
+- CBN-435 filing-hint-scope
+- CBN-434 filing-hint-own-runs
+- CBN-429 fleet-drain-trial-3
+- CBN-432 config-boundary-errors
+- CBN-430 hangup-unwind
+- CBN-431 tee-failure-degrade
+- CBN-428 registry-check-exception-paths
+- CBN-424 registry-tamper-check
+- CBN-426 ci-actions-sha-pin
+- CBN-425 deps-security-bumps
+- CBN-427 ci-permissions-read
+- CBN-388 contract-example-provider
+- CBN-387 contract-hermes-write
+- CBN-382 export-scan-in-ci
+- CBN-400 run-options-merge
+- CBN-399 receipt-model-move
+- CBN-406 contract-pin-repin-v73
+- CBN-385 seed-plan-pointer
+- CBN-386 deny-list-heading
+- CBN-384 contract-transcripts-para
+- CBN-398 usage-probe-subprocess
+- CBN-404 surface-pin-gaps
+- CBN-EPIC-383 hygiene-sweep
+- CBN-EPIC-383.2 export-param-guard
+- CBN-EPIC-383.3 split-test-loop
+- CBN-EPIC-383.4 readme-interface-heading
+- CBN-EPIC-383.N hygiene-sweep audit
+- CBN-397 usage-limit-ansi
+- CBN-396 vision-dashboard-tense
+- CBN-395 contract-scope-table
+- CBN-394 contract-ondisk-cite
+- CBN-393 skill-exit-1
+- CBN-392 hermes-retire-cite
+- CBN-391 readme-provider-tokens
+- CBN-390 contract-hook-p-flag
+- CBN-389 contract-escalation-counts
+- CBN-423 wait-exited-flake
+- CBN-422 candidacy-upstream-filing
+- CBN-420 preexisting-red-baseline
+- CBN-419 confirm-gate-candidacy
+- CBN-421 stale-receipt-surfacing
+- CBN-418 process-gone-pid
+- CBN-417 repin-contract-v75
+- CBN-416 align-v74-model-map
+- CBN-415 contract-pin-repin-v74
+- CBN-414 global provider default
+- CBN-413 stop-reason-enum
+- CBN-412 spec-pin-bump-sync
+- CBN-411 contract-budget-headroom
+- CBN-410 usage-limit-normalize
+- CBN-409 comment-in-code-span
+- CBN-408 rollup-range-edges
+- CBN-402 rollup-align
+- CBN-405 spawn-leaf-module
+- CBN-407 recovery-enum-vocab
+- CBN-403 facade-private-names
+- CBN-401 local-split
+
+## 0.2.0 — 2026-10-18
+
+- CBN-381 public-release-history
+- CBN-376 stale-running-reconcile
+- CBN-378 malloc-noise
+- CBN-379 strip-malloc-env
+- CBN-377 live-worker-log
+- CBN-380 contract-pin-repin
+- CBN-370 public-export-republish
+- CBN-374 public-export-dotfile-refs
+- CBN-373 public-export-scrub-372
+- CBN-375 interrupt-safe-finalize
+- CBN-371 public-export-dead-refs
+- CBN-372 fleet-park-receipt
+- CBN-369 public-export-gaps
+- CBN-368 public-repo-publish
+- CBN-367 public-export
+- CBN-366 repo-name-genericize
+- CBN-365 showcase-license
+- CBN-364 open-source-scrub
+- CBN-EPIC-363 backend-loop-reshape
+- CBN-EPIC-363.2 run-options-bundle
+- CBN-EPIC-363.3 launch-extract
+- CBN-EPIC-363.4 finish-extract
+- CBN-EPIC-363.5 run-echo-extract
+- CBN-EPIC-363.6 inspect-close-decompose
+- CBN-EPIC-363.7 wait-for-close-decompose
+- CBN-EPIC-363.N backend-loop-reshape audit
+- CBN-339 continue-prompt-micro-pointer
+- CBN-EPIC-362 dumb-tty-status-width
+- CBN-EPIC-362.2 pin-console-height
+- CBN-EPIC-362.N dumb-tty-status-width audit
+- CBN-361 clause3-miss-not-obvious
+- CBN-360 roster-and-grok-light-effort
+- CBN-359 seed-hint-real-path
+- CBN-358 fleet-drain-trial-2
+- CBN-354 suite-detail-swift-trailer
+- CBN-355 seed-commit-hint-message
+- CBN-357 close-commit-cannot-say
+- CBN-353 seed-triage-audit-siblings
+- CBN-356 post-suite-reinspect
+- CBN-352 post-settle-tree-truth
+- CBN-351 fleet-drain-trial
+- CBN-350 numbered-audit-siblings
+- CBN-349 killpg-eperm-shutdown
+- CBN-348 fleet-seed-worklist
+- CBN-343 seeded-line-upstream-placement
+- CBN-276 suite-detail-ansi
+- CBN-311 suite-detail-recipe-error
+- CBN-EPIC-307 plan-hygiene
+- CBN-EPIC-307.2 completed-rotation
+- CBN-EPIC-307.3 plan-sidequest-sweep
+- CBN-EPIC-307.N plan-hygiene audit
+- CBN-308 suite-load-flake
+- CBN-309 audit-sibling-deny
+- CBN-299 filing-commit-label
+- CBN-305 playwright-reporter-ci-only
+- CBN-300 stdout-cause-tier-hardening
+- CBN-297 declined-escalation-reason
+- CBN-304 red-suite-descope-stop
+- CBN-303 contract-word-budget
+- CBN-301 gated-close-reads-failed
+- CBN-302 invocation-detail-summary
+- CBN-296 suite-detail-pick
+- CBN-295 drain-invocation-tally
+- CBN-294 descope-recovery-text
+- CBN-293 declined-recovery-text
+- CBN-292 stdout-summary-pick
+- CBN-298 contract-word-budget
+- CBN-291 pinned-skill-skew
+- CBN-290 agents-md-layering
+- CBN-289 exhaustion-carryover
+- CBN-288 allow-then-refuse
+- CBN-287 end-of-run-message
+- CBN-286 repick-on-record
+- CBN-285 summary-line-pick
+- CBN-284 refusal-recovery-text
+- CBN-283 escalation-stderr-summary
+- CBN-282 usage-limit-tail-match
+- CBN-279 amend-then-stack-attribution
+- CBN-281 flaitron-reregister
+- CBN-280 flaitron rename review
+- CBN-277 summary-lead-paragraph
+- CBN-275 amend-stale-sha
+- CBN-278 flaitron-layout
+- CBN-321 unborn-head-stop-reason
+- CBN-320 git-unreadable-receipt
+- CBN-317 dirty-read-git-hang
+- CBN-316 repick-launch-userror
+- CBN-EPIC-314 subprocess-lifecycle
+- CBN-EPIC-314.2 suite-spawn-reap
+- CBN-EPIC-314.3 decode-degrade
+- CBN-EPIC-314.4 fleet-leg-reap
+- CBN-EPIC-314.N subprocess-lifecycle audit
+- CBN-EPIC-313 fleet-concurrency-safety
+- CBN-EPIC-313.2 run-lock-by-path
+- CBN-EPIC-313.3 hook-safe-path
+- CBN-EPIC-313.4 invocation-id-scope
+- CBN-EPIC-313.5 fleet-refusal-split
+- CBN-EPIC-313.6 run-lock-git-root
+- CBN-EPIC-313.N fleet-concurrency-safety audit
+- CBN-315 audit-fork
+- CBN-312 fleet-verb
+- CBN-EPIC-306 contract-headroom
+- CBN-EPIC-306.2 contract-narrative-move
+- CBN-EPIC-306.3 readme-surface-summary
+- CBN-EPIC-306.4 readme-defaults-trim
+- CBN-EPIC-306.N contract-headroom audit
+- CBN-310 suite-lock-wait
+- CBN-347 probe-skill-dir-py314
+- CBN-346 fenced-checkbox-count
+- CBN-344 reader-helper-guard-gaps
+- CBN-342 task-id-sort-key-mixed-types
+- CBN-345 flaitron-reader-doc-drift
+- CBN-341 external-review-offshape-reads
+- CBN-340 actuator-carve-out-wording
+- CBN-338 micro-dispatch-decision
+- CBN-337 external-review-below-box-na
+- CBN-335 v7-live-trial
+- CBN-336 v7-trial-receipt
+- CBN-334 audit-fork-v7-reconcile
+- CBN-330 flaitron-v7-adopt
+- CBN-333 cursor-medium-pin
+- CBN-332 per-provider-effort
+- CBN-331 light-heavy-cap
+- CBN-274 codex-pilot-retry
+- CBN-329 v7-skill-rename-probe
+- CBN-328 park-status-mismatch-diag
+- CBN-327 worker-terminal-state-check
+- CBN-319 claude-md-what-this-is
+- CBN-326 loop-read-oserror
+- CBN-325 try-read-oserror
+- CBN-323 plan-read-decode
+- CBN-324 headlost-contract-gap
+- CBN-318 undecoded-reads-sweep
+- CBN-322 close-head-lost-stop-reason
+- CBN-EPIC-231 safety-net-tighten
+- CBN-EPIC-231.2 timeout-tests-inject-grace
+- CBN-EPIC-231.3 api-payload-seam-guard
+- CBN-EPIC-231.4 rename-github-module
+- CBN-EPIC-231.N safety-net-tighten audit
+- CBN-233 leaf-surface-publicize
+- CBN-EPIC-232 loop-split
+- CBN-EPIC-232.2 loop-surface-pin
+- CBN-EPIC-232.3 prompt-extract
+- CBN-EPIC-232.4 phase-progress-to-reader
+- CBN-EPIC-232.5 wait-extract
+- CBN-EPIC-232.6 review-extract
+- CBN-EPIC-232.N loop-split audit
+- CBN-230 favicon-derive
+- CBN-229 brand-kit-fill
+- CBN-227 skill-retry-carve-out
+- CBN-226 gitleaks-test-sh-path
+- CBN-225 env-example-hermes-defaults
+- CBN-222 rm-legacy-status-card
+- CBN-228 conftest-hermes-deliver-isolate
+- CBN-224 dogfood-archive-exclude
+- CBN-223 agents-snippet-ft-seed
+- CBN-221 docs-currency-post-204-217
+- CBN-220 flowtron-pin-v5.31
+- CBN-217 retire-agent-profile
+- CBN-218 completed-rotation
+- CBN-216 hook-guard-on-argv
+- CBN-215 suite-fitness-preflight
+- CBN-219 stale-loop-importer-pin
+- CBN-214 phase-progress-echo
+- CBN-213 usage-limit-repick
+- CBN-207 justfile-worker-backfill
+- CBN-209 unparsed-prose-bullet-docstring-drift
+- CBN-212 headless-background-guard
+- CBN-211 missing-recipe-folds-refused
+- CBN-210 checked-row-unparsed-probe
+- CBN-208 digest-park-affix-doc
+- CBN-204 retire-cao-adapter
+- CBN-203 grammar-fixtures-consumer
+- CBN-EPIC-202 deterministic-suite-gate
+- CBN-EPIC-202.1 deterministic-suite-gate discovery
+- CBN-EPIC-202.2 suite-record-shape
+- CBN-EPIC-202.3 suite-runner-wiring
+- CBN-EPIC-202.4 proceed-on-green-suite-gate
+- CBN-EPIC-202.5 suite-report-surfaces
+- CBN-EPIC-202.N deterministic-suite-gate audit
+- CBN-201 flowtron-pin-v5290
+- CBN-200 exit-detail-last-stdout-line
+- CBN-199 worker-prompt-foreground-only
+- CBN-198 reviewer-code-fs-lowercase-paths
+- CBN-197 reviewer-typecheck-handoff
+- CBN-196 status-card-echo-label
+- CBN-EPIC-188 status-snippet-caller-side
+- CBN-188.1 status-snippet discovery
+- CBN-188.2 status-card-caller-side
+- CBN-188.3 snippet-gate-retire
+- CBN-188.4 fleet-boundary-carve-out
+- CBN-188.N status-snippet audit
+- CBN-195 favicon-standard-adopt
+- CBN-194 flowtron-parse-contract-pin-bump
+- CBN-193 park-reason-upstream-fix-cite
+- CBN-192 blocker-resolution-archive
+- CBN-191 contract-provenance-refresh
+- CBN-190 continue-prompt-upstream-cite
+- CBN-189 continue-prompt-core-less-path
+- CBN-187 visual-park-visibility
+- CBN-183 stale-ft-starter-task-readme-ref
+- CBN-186 parked-note-yaml-tolerance
+- CBN-184 closed-run-tree-residue
+- CBN-185 reviewer-runs-typecheck
+- CBN-181 hermes-review-status-display
+- CBN-182 hermes-warning-stream-verify
+- CBN-179 retired-skill-symlink-cleanup
+- CBN-180 reviewer-profile-default-and-degrade
+- CBN-178 claude-md-provenance-collapse
+- CBN-157 seed-triage-and-paste-ready-sed
+- CBN-177 retire-hermes-messaging-grant
+- CBN-175 hermes-mcp-join-timeout-upstream
+- CBN-170 quality-stack-gaps
+- CBN-173 install-provenance-git-home
+- CBN-174 hermes-reviewer-runs-the-suite
+- CBN-164 status-ui-ignored-tree
+- CBN-176 hermes-reviewer-channel-setup
+- CBN-163 hermes-supervisor-delivery-and-memory
+- CBN-161 hermes-verification-access
+- CBN-172 foreign-commit-during-run
+- CBN-171 worker-exit-tree-snapshot
+- CBN-169 install-provenance-line
+- CBN-167 mirror-glyph-before-tokens
+- CBN-166 stale-pin-guard
+- CBN-165 codex-sol-astra-pins
+- CBN-162 worker-exit-evidence
+- CBN-160 structured-hermes-verdict
+- CBN-168 vanished-file-race-in-watch-loop
+- CBN-159 hermes-every-close-default
+- CBN-158 close-from-head-not-worktree
+- CBN-156 flowtron-self-probe-fallback
+- CBN-155 local-worker-default-and-cao-probe
+- CBN-154 snippet-preflight-gate
+- CBN-153 flush-hermes-window-on-review-error
+- CBN-149 cohort-line-count-drift
+- CBN-150 agents-pin-pointer
+- CBN-152 close-summary-anchor
+- CBN-151 next-task-validation
+- CBN-148 hermes-output-capture
+- CBN-147 hermes-read-authority
+- CBN-146 facade-private-seam
+- CBN-145 park-helper-regroup
+- CBN-144 contract-grammar-ref
+- CBN-EPIC-143 flowtron-reader-split
+- CBN-143.2 flowtron-facade-pin
+- CBN-143.3 flowtron-package-move
+- CBN-143.4 flowtron-layout-extract
+- CBN-143.5 flowtron-grammar-extract
+- CBN-143.6 flowtron-dto-extract
+- CBN-143.7 flowtron-reader-extract
+- CBN-143.8 flowtron-selection-extract
+- CBN-143.N flowtron-reader-split audit
+- CBN-141 contract-status-provenance
+- CBN-140 last-run-panel-confirm
+- CBN-139 flowtron-pin-v5260
+- CBN-EPIC-138 followup-filing-loop
+- CBN-138.1 followup-filing-loop discovery
+- CBN-138.2 worker-followup-cue
+- CBN-138.3 new-row-detection
+- CBN-138.4 filing-artifact-surfaces
+- CBN-138.5 upstream-unattended-filing
+- CBN-138.N followup-filing-loop audit
+- CBN-124 fleet-run-verb-scope-decision
+- CBN-136 hitl-eligibility-signal
+- CBN-133 (internal)
+- CBN-135 duplicate-run-record-dump
+- CBN-132 cli-path-install-drift
+- CBN-131 register-path-case-mismatch
+- CBN-126 flowtron-upstream-filing
+- CBN-130 status-tree-state-blindness
+- CBN-128 seed-worklist-eligibility-blindness
+- CBN-125 marker-evaporation-guard
+- CBN-134 tier-set-scope-decision
+- CBN-123 concurrent-slug-drain-proof
+- CBN-127 flowtron-pin-v5.24
+- CBN-121 followup-capture-surface
+- CBN-122 trial-friction-doc-deposits
+- CBN-EPIC-120 live-proofs
+- CBN-120.1 live-proofs discovery
+- CBN-120.2 cohort-walk-trial
+- CBN-120.3 xheavy-live-denial
+- CBN-120.N live-proofs audit
+- CBN-250 dependabot-enable
+- CBN-236 contract-phase-row-cite
+- CBN-EPIC-244 run-loop-feedback-and-shape
+- CBN-EPIC-244.2 loop-test-speed
+- CBN-EPIC-244.3 loop-refactor-plan
+- CBN-EPIC-244.4 loop-lifecycle-pins
+- CBN-EPIC-244.5 run-gated-decompose
+- CBN-EPIC-244.6 execute-run-decompose
+- CBN-EPIC-244.7 review-surface-rename
+- CBN-EPIC-244.N run-loop-feedback-and-shape audit
+- CBN-258 hermes-retire
+- CBN-253 hermes-silent-launch-failure
+- CBN-249 verdict-redaction
+- CBN-257 external-review-field
+- CBN-242 hermes-vs-external-review
+- CBN-205 hermes-marginal-value
+- CBN-256 model-currency-check
+- CBN-255 medium-model-evidence
+- CBN-254 grok-4.7-bump
+- CBN-252 parked-head-refusal
+- CBN-251 relative-home-guard
+- CBN-248 api-trusted-host
+- CBN-EPIC-243 worker-process-containment
+- CBN-EPIC-243.2 worker-process-group
+- CBN-EPIC-243.N worker-process-containment audit
+- CBN-241 flowtron-pin-sync
+- CBN-247 worker-registry-guard
+- CBN-246 drain-marked-set-pin
+- CBN-238 close-module-unbundle
+- CBN-237 tasknote-body-reader-consolidate
+- CBN-240 flowtron-facade-all-comment
+- CBN-235 flowtron-phase-heading-surface
+- CBN-234 denial-triage-key-drift
+- CBN-137 handoff-marker-upstream-filing
+- CBN-273 unattended-codex-pilot
+- CBN-272 drain-outcomes-recovery
+- CBN-EPIC-271 contract-decision-log-split
+- CBN-271.1 contract-decision-log-split discovery
+- CBN-271.2 registry-run-record-decisions
+- CBN-271.3 cli-fleet-surface-decisions
+- CBN-271.4 flowtron-reader-decisions
+- CBN-271.5 worker-run-loop-decisions
+- CBN-271.6 picker-model-map-decisions
+- CBN-271.N contract-decision-log-split audit
+- CBN-239 cli-render-split
+- CBN-266 run-deps-bundle
+- CBN-206 contract-decision-log-split
+- CBN-270 shutdown-race-hardening
+- CBN-269 git-none-callers
+- CBN-260 dispatch-deny-hardening
+- CBN-265 cao-residue-sweep
+- CBN-264 store-slug-validate
+- CBN-263 api-typed-payload
+- CBN-262 worker-group-reap
+- CBN-261 git-call-hardening
+- CBN-267 contract-drift-sweep
+- CBN-268 skill-pog-stop-wording
+- CBN-EPIC-245 lint-and-config-fit
+- CBN-EPIC-245.2 try003-ignore
+- CBN-EPIC-245.3 vitest-config-ext
+- CBN-EPIC-245.N lint-and-config-fit audit
+- CBN-259 cbn-205-archive
+- CBN-EPIC-119 fleet-seeding
+- CBN-119.1 fleet-seeding discovery
+- CBN-119.2 unparsed-escalation
+- CBN-119.3 seeding-report
+- CBN-119.4 wave2-drain-trials
+- CBN-119.N fleet-seeding audit
+- CBN-114 xheavy-task-class
+- CBN-118 gated-marker-posture
+- CBN-117 next-task-posture
+- CBN-EPIC-18 fleet-rollout
+- CBN-EPIC-18.1 fleet-rollout discovery
+- CBN-EPIC-18.2 rollout-survey
+- CBN-EPIC-18.3 eligibility-coverage
+- CBN-EPIC-18.4 staged-drain-trials
+- CBN-EPIC-18.N fleet-rollout audit
+- CBN-116 plan-blocked-by-gate
+- CBN-115 unparsed-row-blindspot
+- CBN-EPIC-17 unattended-eligibility
+- CBN-EPIC-17.1 unattended-eligibility discovery
+- CBN-EPIC-17.2 eligibility-predicate
+- CBN-EPIC-17.3 operator-boundary
+- CBN-EPIC-17.4 upstream-marker-filing
+- CBN-EPIC-17.N unattended-eligibility audit
+- CBN-EPIC-16 audit-hardening
+- CBN-EPIC-16.2 run-mutex
+- CBN-EPIC-16.3 usage-claim-honesty
+- CBN-EPIC-16.4 readme-status-trim
+- CBN-EPIC-16.5 degenerate-ui-check
+- CBN-EPIC-16.N audit-hardening audit
+- CBN-113 pin-reverify-recipe
+- CBN-112 spec-pin-refresh
+- CBN-111 self-pin-staleness
+- CBN-110 worker-error-diagnosis
+- CBN-109 resume-prompt-posture
+- CBN-108 target-pin-guard
+- CBN-EPIC-15 effort-aware-routing
+- CBN-EPIC-15.1 effort-aware-routing discovery
+- CBN-EPIC-15.2 effort-seam
+- CBN-EPIC-15.3 class-to-effort-map
+- CBN-EPIC-15.4 routing-contract
+- CBN-EPIC-15.N effort-aware-routing audit
+- CBN-EPIC-14 unattended-posture
+- CBN-EPIC-14.1 unattended-posture discovery
+- CBN-EPIC-14.2 pin-bump
+- CBN-EPIC-14.3 unattended-invocation
+- CBN-EPIC-14.4 park-reason-capture
+- CBN-EPIC-14.5 unattended-drain
+- CBN-EPIC-14.N unattended-posture audit
+- CBN-EPIC-13 supporting-repo-alignment
+- CBN-EPIC-13.1 supporting-repo-alignment discovery
+- CBN-EPIC-13.2 actuator-boundary-record
+- CBN-EPIC-13.3 self-registration
+- CBN-EPIC-13.4 toolchain-alignment
+- CBN-EPIC-13.N supporting-repo-alignment audit
+- CBN-107 contract-record-guards
+- CBN-106 run-record-read-guard
+- CBN-EPIC-12 run-ops-visibility
+- CBN-EPIC-12.2 run-signal-fields
+- CBN-EPIC-12.3 api-run-history
+- CBN-EPIC-12.4 fe-run-history
+- CBN-EPIC-12.5 skill-and-entry-points
+- CBN-EPIC-12.6 third-eval-run
+- CBN-EPIC-12.7 fleet-run-stats
+- CBN-EPIC-12.8 fe-fleet-stats
+- CBN-EPIC-12.N run-ops-visibility audit
+- CBN-105 frontend-port-collision
+- CBN-104 entry-point-worker-adapter
+- CBN-103 hermes-review-authority
+- CBN-102 run-ops-visibility
+- CBN-100 python-floor
+- CBN-099 rollup-id-padding
+- CBN-098 last-run-time-order
+- CBN-101 contract-anchor-gaps
+- CBN-EPIC-11 residue-and-drift
+- CBN-EPIC-11.2 prune-unused-deps
+- CBN-EPIC-11.3 contract-drift-fixes
+- CBN-EPIC-11.4 contract-drift-guard
+- CBN-EPIC-11.N residue-and-drift audit
+- CBN-EPIC-10 gate-parity
+- CBN-EPIC-10.2 e2e-in-ci
+- CBN-EPIC-10.3 eslint-warning-gate
+- CBN-EPIC-10.N gate-parity audit
+- CBN-097 allow-list-recipe-guard
+- CBN-096 contract-status-refresh
+- CBN-095 lint-gate-parity
+- CBN-EPIC-95 second-trial
+- CBN-EPIC-95.1 second-trial discovery
+- CBN-EPIC-95.2 seed-code-cohort
+- CBN-EPIC-95.3 green-live-run
+- CBN-EPIC-95.4 refine-from-friction-2
+- CBN-EPIC-95.N second-trial audit
+- CBN-094 de-cao-vocabulary
+- CBN-091 multi-provider-run
+- CBN-093 readme-status-clause
+- CBN-092 summary-truncation
+- CBN-EPIC-9 dogfood-live-run
+- CBN-EPIC-9.1 dogfood-live-run discovery
+- CBN-EPIC-9.2 subprocess-worker
+- CBN-EPIC-9.3 (internal)
+- CBN-EPIC-9.4 plow-live-run
+- CBN-EPIC-9.5 refine-from-friction
+- CBN-EPIC-9.N dogfood-live-run audit
+- CBN-053 closure-box-sweep
+- CBN-EPIC-8 retire-scaffold
+- CBN-EPIC-8.2 drop-worker-deploy
+- CBN-EPIC-8.3 env-example-truth
+- CBN-EPIC-8.4 retire-seed-plan
+- CBN-EPIC-8.5 serve-reload-flag
+- CBN-EPIC-8.N retire-scaffold audit
+- CBN-EPIC-7 harden-write-side
+- CBN-EPIC-7.2 scoped-status-commit
+- CBN-EPIC-7.3 scope-api-cors
+- CBN-EPIC-7.4 tasknote-yaml-guard
+- CBN-EPIC-7.N harden-write-side audit
+- CBN-EPIC-6 arm-safety-net
+- CBN-EPIC-6.2 format-gate
+- CBN-EPIC-6.3 push-and-ci
+- CBN-EPIC-6.4 e2e-gate
+- CBN-EPIC-6.5 hermetic-usage-guard
+- CBN-EPIC-6.6 ci-node24
+- CBN-EPIC-6.N arm-safety-net audit
+- CBN-052 more-providers
+- CBN-051 hermes-window
+- CBN-050 later-tiers
+- CBN-041 status-ui
+- CBN-040 status-api
+- CBN-033 github-status
+- CBN-032 daily-digest
+- CBN-031 epic-rollup
+- CBN-030 hermes-review
+- CBN-023 picker-into-loop
+- CBN-022 picker
+- CBN-021 task-to-model
+- CBN-020 usage-adapters
+- CBN-014 cli-report
+- CBN-013 gated-run-loop
+- CBN-012 cao-client
+- CBN-011 flowtron-reader
+- CBN-010 local-registry
+- CBN-004 hermes-brief-format
+- CBN-002 product-contract
+- CBN-003 closure-ingest-spike
+- CBN-001 repo-init

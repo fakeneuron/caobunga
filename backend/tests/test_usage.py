@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -16,6 +17,7 @@ from caobunga.usage import (
     parse_leftover,
     probe,
     probe_all,
+    run_argv,
 )
 
 
@@ -169,3 +171,19 @@ def test_default_runner_nonzero_is_unknown() -> None:
     )
     assert usage.installed is True
     assert usage.leftover is Leftover.UNKNOWN
+
+
+def test_run_argv_detaches_stdin_and_kills_the_whole_tree_on_timeout() -> None:
+    """The probe spawn follows the suite's rules (CBN-398): a child reading stdin
+    sees EOF at once, and a timeout reaps its children too, not only the leader."""
+    assert run_argv(["sh", "-c", "read x; echo got:$x"], 10.0).strip() == "got:"
+    marker = f"cbn398-{os.getpid()}"
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_argv(["sh", "-c", f"sleep 30 & sleep 30; : {marker}"], 1.0)
+    alive = subprocess.run(["pgrep", "-f", marker], capture_output=True, text=True, check=False)  # noqa: S603, S607
+    assert alive.stdout.strip() == "", f"process group survived the timeout: {alive.stdout}"
+
+
+def test_run_argv_keeps_stderr_out_of_stdout_and_replaces_non_utf8() -> None:
+    """stderr never reaches the parsed stdout; invalid UTF-8 is replaced, not raised."""
+    assert run_argv(["sh", "-c", r"echo warn >&2; printf '\377ok\n'"], 10.0) == "�ok\n"

@@ -27,7 +27,7 @@ Flaitron already keeps one task per context window. The missing piece is the out
 |-------|------|
 | Flaitron (in each repo) | Plan, tasknotes, phases, commit-as-done, next-task cue |
 | Worker adapter (local subprocess) | Isolated CLI sessions (Grok Build, Codex, Claude Code, Cursor CLI, …) |
-| Caobunga | Registry, best-effort usage routing (degrades to installed order), drain loop, deterministic suite on every close (`just test` / `lint` / `typecheck` → `suite:` on the run record, CBN-EPIC-202.3; `proceed-on-green` continues only on `green`, CBN-EPIC-202.4), run ledger, status dashboard |
+| Caobunga | Registry, best-effort usage routing (degrades to installed order), drain loop, deterministic suite on every close (`just test` / `lint` / `typecheck` → `suite:` on the run record, CBN-EPIC-202.3; `proceed-on-green` continues only on `green`, CBN-EPIC-202.4, or past a park its worker committed with nothing but workflow files, CBN-443) and once before the first dispatch, refusing a repo whose suite is already failing (CBN-420), run ledger, status dashboard |
 
 Caobunga sits **beside** Fleet HQ, the operator's fleet dashboard and standards repo — not downstream of it. Fleet HQ's facts are about repositories as they exist on disk; caobunga's are about runs it performed. It reads each registered repo's own `.flaitron/PLAN.md`, its archived tasknotes, and its pinned `/ft-task` skill directory directly, and no Fleet HQ surface. Four words mean different things in the two systems — **rollup**, **digest**, **stats**, and **fleet-wide** — so check which one you are reading before merging the numbers: [docs/CONTRACT.md](docs/CONTRACT.md) §"Fleet boundary".
 
@@ -55,12 +55,13 @@ If the repo is not registered, the skill **refuses** and prints the `caobunga
 register` command for you to run yourself. It never registers on your behalf.
 
 To run the whole fleet, `caobunga fleet [--jobs N]` runs every enabled
-project's `run` side by side, at most N (default 3) at once, each line prefixed
+project's `run` side by side, at most N (default 4) at once, each line prefixed
 `[slug]`, then prints one receipt. One repo stopping never halts the others, and
 there is no resume — run it again and repos with nothing eligible exit at once.
 A repo whose `run` exited 0 but whose invocation receipt says it stopped short
 (a park, a red suite) reads `incomplete (…)` on the receipt and fails the fleet
-(CBN-372). Why it exists now after CBN-124 declined it: [docs/CONTRACT.md](docs/CONTRACT.md)
+(CBN-372); a park also names its resume and what the drain ran after it (CBN-443). One that could not write its receipt at all (a full disk) reads
+`receipt unwritten (…)` (CBN-442). Why it exists now after CBN-124 declined it: [docs/CONTRACT.md](docs/CONTRACT.md)
 §"Entry points" (CBN-312).
 
 The registry CLI ships as a console script in `backend/`; `uv sync` puts it in
@@ -86,17 +87,22 @@ ln -s ~/code/caobunga/.claude/skills/caobunga   <repo>/.claude/skills/caobunga
 ln -s ~/code/caobunga/.claude/commands/caobunga.md <repo>/.claude/commands/caobunga.md
 ```
 
-## Intended interface (v1)
+## Interface (v1)
 
 ```sh
-caobunga register <path> [--id SLUG] [--tier TIER] [--replace] [--provider NAME] [--model ID] [--providers LIST]
+caobunga register <path> [--id SLUG] [--tier TIER] [--replace] [--provider NAME] [--model ID] [--providers LIST] [--clear-providers] [--bootstrap CMD] [--bootstrap-timeout S] [--clear-bootstrap] [--isolate | --no-isolate]
+caobunga providers [LIST] [--clear]   # show / set / clear the global allow-list for records without --providers
 caobunga projects
-caobunga status [project]      # + stale-pin warnings, [unattended] marker coverage, drift, new rows, and target-tree state
+caobunga status [project]      # + stale-pin warnings, [unattended] marker coverage, drift, new rows, target-tree state, and running receipts (live / stale + commits landed since)
 caobunga status --seed         # fleet seeding worklist: every repo's obvious unmarked rows + paste-ready sed blocks
 caobunga run <project>          # honor registry tier
-caobunga fleet [--jobs N]       # run every enabled project, N at a time (default 3), one receipt
-caobunga digest                 # daily fleet rollup + follow-ups proposed + PLAN rows filed + model pins
+caobunga fleet [--jobs N]       # run every enabled project, N at a time (default 4), one receipt
+caobunga digest                 # daily fleet rollup + follow-ups proposed + PLAN rows filed + stale receipts + model pins
 ```
+
+`--provider` / `--providers` take worker tokens, not display names: `grok_cli`, `claude_code`, `codex`, `cursor_cli`, `opencode_cli` (registrable, but the local adapter has no launch recipe for it — [docs/CONTRACT.md](docs/CONTRACT.md) §"Registry").
+
+`--isolate` runs each launched task in its own `wt-<ID>` worktree and fast-forwards only a clean, green close into main; anything else stays on its branch for you to inspect. Later runs skip that task (and anything blocked by it) until you remove the branch, and a drain carries on past a park to unrelated rows (`--no-isolate` turns it off). `caobunga status <id>` lists each leftover branch with its landing state and the commands to land, resume or remove it. `--bootstrap` (usually `"just setup"`) names the command that worktree runs before its baseline suite. It is stored and served in plain text, so never put a secret in it ([docs/CONTRACT.md](docs/CONTRACT.md) §"Run loop" → "Isolated dispatch").
 
 The verb set is closed; `/caobunga` adds none — it resolves a slug and calls
 `run`.
@@ -104,7 +110,7 @@ The verb set is closed; `/caobunga` adds none — it resolves a slug and calls
 Dashboard is **status-only** (no start/stop/approve in v1). Pair `just api` + `just dev` locally.
 
 - Read-only HTTP API on `127.0.0.1:8013`: `GET /api/projects`, `GET /api/projects/{id}`, `GET /api/digest`, `GET /api/stats`.
-- Vite status UI on `127.0.0.1:5195` (proxies the API): fleet table `/`, project detail `/projects/{id}`, fleet stats `/stats`.
+- Vite status UI on `127.0.0.1:5195` (proxies the API): fleet table `/`, project detail `/projects/{id}`, fleet stats `/stats`, fleet digest `/digest`.
 
 Payload fields, marker coverage, target-tree state, run history, and the Last run panel are specified in [docs/CONTRACT.md](docs/CONTRACT.md) §"Status API" and §"Status UI".
 

@@ -1,5 +1,7 @@
 """Store and model validation without going through click."""
 
+import errno
+import os
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -7,11 +9,13 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from caobunga.digest import run_bullet
 from caobunga.errors import UnknownProjectError, UserError
 from caobunga.models import (
     CLOSURE_OUTCOMES,
     Escalation,
     ExecutionTier,
+    GlobalConfig,
     HermesReview,
     NewRow,
     Outcome,
@@ -21,6 +25,8 @@ from caobunga.models import (
     SuiteVerb,
     SuiteVerdict,
 )
+from caobunga.status_card import format_status
+from caobunga.status_render import outcome_cell
 from caobunga.store import Store
 
 CLOSED_AT = datetime(2026, 8, 19, tzinfo=UTC)
@@ -99,6 +105,34 @@ def test_unknown_keys_ignored() -> None:
     assert record.id == "webapp"
 
 
+def test_a_write_that_fails_midway_leaves_no_tmp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CBN-442 review: a partial write on a full disk gives its space back."""
+    store = Store(tmp_path)
+
+    def full(_fd: int) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(os, "fsync", full)
+    with pytest.raises(OSError, match="No space left"):
+        store.write_run(_closure(Outcome.CLOSED, suite=green_suite()))
+    assert not list(tmp_path.rglob("*.tmp"))
+
+
+def test_a_failed_rename_leaves_no_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """CBN-442 review: a written tmp whose rename fails is removed too."""
+    store = Store(tmp_path)
+
+    def refused(*_args: object) -> None:
+        raise PermissionError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(os, "replace", refused)
+    with pytest.raises(PermissionError):
+        store.write_run(_closure(Outcome.CLOSED, suite=green_suite()))
+    assert not list(tmp_path.rglob("*.tmp"))
+
+
 def test_last_run_orders_same_second_by_millis(tmp_path: Path) -> None:
     """CBN-098: same UTC second must not fall back to task-id lexicographic order."""
     store = Store(tmp_path / "home")
@@ -145,11 +179,13 @@ def test_project_file_rejects_invalid_slug(tmp_path: Path) -> None:
         store.project_file("../escape")
 
 
-def test_corrupt_registry_file(tmp_path: Path) -> None:
+@pytest.mark.parametrize("body", ["- not a mapping\n", "id: [webapp\n", "path: /tmp/webapp\n"])
+def test_corrupt_registry_file(tmp_path: Path, body: str) -> None:
+    """CBN-432: not-a-mapping, malformed YAML, and schema-invalid all raise the same `UserError`."""
     store = Store(tmp_path / "home")
     target = store.project_file("webapp")
     target.parent.mkdir(parents=True)
-    target.write_text("- not a mapping\n", encoding="utf-8")
+    target.write_text(body, encoding="utf-8")
     with pytest.raises(UserError, match="corrupt registry"):
         store.get("webapp")
 
@@ -196,6 +232,65 @@ def test_re_register_same_path_keeps_providers(tmp_path: Path) -> None:
     assert updated.tier is ExecutionTier.PROCEED_ON_GREEN
     assert updated.providers == ["claude_code", "codex"]
     assert store.get("app").providers == ["claude_code", "codex"]
+
+
+def test_registry_bootstrap_absent_on_an_old_record(tmp_path: Path) -> None:
+    """CBN-EPIC-450.3: a record written before the fields loads with both absent."""
+    store = Store(tmp_path)
+    store.project_file("app").parent.mkdir(parents=True, exist_ok=True)
+    store.project_file("app").write_text(
+        "schema_version: 1\nid: app\npath: /tmp/app\ntier: gated\n"
+        "registered_at: '2026-01-01T00:00:00Z'\nenabled: true\n",
+        encoding="utf-8",
+    )
+    record = store.get("app")
+    assert record.bootstrap is None
+    assert record.bootstrap_timeout is None
+    assert "bootstrap" not in record.model_dump(exclude_none=True)
+
+
+def test_registry_bootstrap_round_trip_and_validation(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    store.register(
+        RegistryRecord(id="app", path="/tmp/app", bootstrap=["just", "setup"], bootstrap_timeout=90)  # noqa: S108
+    )
+    assert store.get("app").bootstrap == ["just", "setup"]
+    assert store.get("app").bootstrap_timeout == 90.0
+    assert RegistryRecord(id="app", path="/tmp/app", bootstrap=[]).bootstrap is None  # noqa: S108
+    # A timeout without its argv is a stray half, dropped rather than kept.
+    orphan = RegistryRecord(id="app", path="/tmp/app", bootstrap=[], bootstrap_timeout=900)  # noqa: S108
+    assert (orphan.bootstrap, orphan.bootstrap_timeout) == (None, None)
+    with pytest.raises(ValidationError):
+        RegistryRecord(id="app", path="/tmp/app", bootstrap=["x"], bootstrap_timeout=0)  # noqa: S108
+
+
+def test_re_register_bootstrap_moves_as_a_unit(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    path = "/tmp/app"  # noqa: S108
+    store.register(RegistryRecord(id="app", path=path, bootstrap=["a"], bootstrap_timeout=5))
+    kept = store.register(RegistryRecord(id="app", path=path, tier=ExecutionTier.PROCEED_ON_GREEN))
+    assert (kept.bootstrap, kept.bootstrap_timeout) == (["a"], 5.0)
+    # A new argv without a timeout drops the stale one.
+    moved = store.register(RegistryRecord(id="app", path=path, bootstrap=["b"]))
+    assert (moved.bootstrap, moved.bootstrap_timeout) == (["b"], None)
+    cleared = store.register(RegistryRecord(id="app", path=path), clear_bootstrap=True)
+    assert (cleared.bootstrap, cleared.bootstrap_timeout) == (None, None)
+    assert store.get("app").bootstrap is None
+
+
+def test_registry_isolate_absent_on_an_old_record_and_kept_on_re_register(tmp_path: Path) -> None:
+    """CBN-EPIC-450.4: opt-in; absent loads as off and a re-register naming it not keeps it."""
+    store = Store(tmp_path)
+    path = "/tmp/app"  # noqa: S108
+    store.register(RegistryRecord(id="app", path=path))
+    assert store.get("app").isolate is None
+    assert "isolate" not in store.get("app").model_dump(exclude_unset=True)
+    store.register(RegistryRecord(id="app", path=path, isolate=True))
+    kept = store.register(RegistryRecord(id="app", path=path, tier=ExecutionTier.PROCEED_ON_GREEN))
+    assert kept.isolate is True
+    off = store.register(RegistryRecord(id="app", path=path, isolate=False))
+    assert off.isolate is False
+    assert store.get("app").isolate is False
 
 
 # --- Case-insensitive repo identity (CBN-131) ---
@@ -303,6 +398,80 @@ def test_tier_only_reregister_preserves_pins(tmp_path: Path) -> None:
     )
     assert merged.tier is ExecutionTier.GATED
     assert merged.providers == ["claude_code", "codex"]
+
+
+def test_keep_tier_reregister_leaves_stored_tier(tmp_path: Path) -> None:
+    """CBN-414: re-register without --tier no longer resets proceed-on-green to gated."""
+    store = Store(tmp_path / "home")
+    repo = tmp_path / "toolkit"
+    repo.mkdir()
+    _registered(store, repo)
+    merged = store.register(
+        RegistryRecord(id="toolkit", path=str(repo.resolve()), providers=["codex"]),
+        keep_tier=True,
+    )
+    assert merged.tier is ExecutionTier.PROCEED_ON_GREEN
+    assert merged.providers == ["codex"]
+
+
+def test_keep_tier_is_ignored_on_a_fresh_record(tmp_path: Path) -> None:
+    store = Store(tmp_path / "home")
+    fresh = store.register(RegistryRecord(id="app", path="/tmp/app"), keep_tier=True)  # noqa: S108
+    assert fresh.tier is ExecutionTier.GATED
+
+
+def test_clear_providers_drops_the_list_and_keeps_a_pin(tmp_path: Path) -> None:
+    store = Store(tmp_path / "home")
+    repo = tmp_path / "toolkit"
+    repo.mkdir()
+    _registered(store, repo, providers=["claude_code", "codex"])
+    cleared = store.register(
+        RegistryRecord(id="toolkit", path=str(repo.resolve())), keep_tier=True, clear_providers=True
+    )
+    assert cleared.providers is None
+    assert cleared.tier is ExecutionTier.PROCEED_ON_GREEN
+    _registered(store, repo, provider="codex")
+    pinned = store.register(
+        RegistryRecord(id="toolkit", path=str(repo.resolve())), keep_tier=True, clear_providers=True
+    )
+    assert pinned.provider == "codex"
+
+
+def test_config_absent_is_empty_and_round_trips(tmp_path: Path) -> None:
+    store = Store(tmp_path / "home")
+    assert store.load_config().providers is None
+    store.save_config(GlobalConfig(providers=[" codex", "codex", "claude_code"]))
+    assert store.load_config().providers == ["codex", "claude_code"]
+
+
+@pytest.mark.parametrize("body", ["- not a mapping\n", "providers: [codex\n", "providers: codex\n"])
+def test_corrupt_config_raises(tmp_path: Path, body: str) -> None:
+    """Operator state loads strictly, like the registry (CBN-414)."""
+    store = Store(tmp_path / "home")
+    store.home.mkdir(parents=True)
+    store.config_file().write_text(body, encoding="utf-8")
+    with pytest.raises(UserError, match="corrupt config"):
+        store.load_config()
+
+
+def test_registry_digest_moves_on_modify_add_remove(tmp_path: Path) -> None:
+    """CBN-424: home-relative keys; every registry write changes the digest."""
+    store = Store(tmp_path / "home")
+    assert store.registry_digest() == {}
+    store.register(RegistryRecord(id="app", path=str(tmp_path.resolve())))
+    before = store.registry_digest()
+    assert list(before) == ["projects/app.yaml"]
+
+    store.save_config(GlobalConfig(providers=["codex"]))
+    added = store.registry_digest()
+    assert sorted(added) == ["config.yaml", "projects/app.yaml"]
+
+    project = store.project_file("app")
+    project.write_text(project.read_text(encoding="utf-8") + "# x\n", encoding="utf-8")
+    assert store.registry_digest()["projects/app.yaml"] != before["projects/app.yaml"]
+
+    project.unlink()
+    assert list(store.registry_digest()) == ["config.yaml"]
 
 
 # --- run signal fields (CBN-EPIC-12.2) -----------------------------------
@@ -465,17 +634,19 @@ def test_every_run_unreadable_reads_as_no_runs(tmp_path: Path) -> None:
     assert store.last_run("webapp") is None
 
 
-def test_corrupt_registry_still_raises_on_the_fleet_path(tmp_path: Path) -> None:
+@pytest.mark.parametrize("body", ["just a string\n", "id: [webapp\n", "path: /tmp/webapp\n"])
+def test_corrupt_registry_still_raises_on_the_fleet_path(tmp_path: Path, body: str) -> None:
     """CBN-106's asymmetry, pinned on the path the fleet reads take.
 
     `test_corrupt_registry_file` covers `Store.get`; this covers `list_projects`,
     which is what `/api/projects` and `stats.fleet_stats` call. Runs went lenient
     there and the registry deliberately did not — skipping a corrupt registry file
-    would silently unregister a project rather than degrade one row.
+    would silently unregister a project rather than degrade one row. CBN-432 added
+    the malformed-YAML and schema-invalid cases alongside the original not-a-mapping one.
     """
     store = Store(tmp_path / "home")
     store.projects_dir().mkdir(parents=True)
-    store.project_file("webapp").write_text("just a string\n", encoding="utf-8")
+    store.project_file("webapp").write_text(body, encoding="utf-8")
     with pytest.raises(UserError, match="corrupt registry"):
         store.list_projects()
 
@@ -566,6 +737,29 @@ def test_legacy_v1_closure_record_without_suite_still_loads(
     assert loaded[0].schema_version == 1
     assert loaded[0].outcome is outcome
     assert loaded[0].suite is None
+
+
+def test_record_without_effort_still_loads_and_omits_the_key(tmp_path: Path) -> None:
+    """CBN-453: a record written before `effort` loads with `None` and dumps without the key."""
+    store = Store(tmp_path / "home")
+    runs = store.runs_dir("webapp")
+    runs.mkdir(parents=True)
+    (runs / "20260819T000000000Z-CBN-001.yaml").write_text(
+        "schema_version: 1\n"
+        "project: webapp\n"
+        "task_id: CBN-001\n"
+        "outcome: closed\n"
+        f"commit_sha: {'a' * 40}\n"
+        "closed_at: 2026-08-19T00:00:00Z\n"
+        "provider: codex\n"
+        "model: gpt-5.6-terra\n"
+        "summary: before the field\n",
+        encoding="utf-8",
+    )
+    (loaded,) = store.list_runs("webapp")
+    assert loaded.model == "gpt-5.6-terra"
+    assert loaded.effort is None
+    assert "effort" not in loaded.model_dump(mode="json", exclude_none=True)
 
 
 def test_v2_closure_record_without_suite_is_skipped_not_raised(tmp_path: Path) -> None:
@@ -953,9 +1147,49 @@ def test_invocation_receipts_roundtrip_atomic_and_unique(tmp_path: Path) -> None
 
 
 def test_running_receipt_cannot_claim_success(tmp_path: Path) -> None:
-    from caobunga.invocation import InvocationResult, InvocationTrace
+    from caobunga.invocation import InvocationTrace
+    from caobunga.models import InvocationResult
 
     raw = InvocationTrace("app", Store(tmp_path)).result.model_dump()
     raw["successful"] = True
     with pytest.raises(ValidationError, match="success does not match"):
         InvocationResult.model_validate(raw)
+
+
+def test_running_invocations_none_scans_every_project(tmp_path: Path) -> None:
+    """CBN-421: the fleet `status` reads every project's `running` receipts in one scan."""
+    from caobunga.invocation import InvocationTrace
+
+    store = Store(tmp_path)
+    for project in ("alpha", "beta"):
+        InvocationTrace(project, store).checkpoint()
+    assert sorted(r.project for r in store.running_invocations(None)) == ["alpha", "beta"]
+    assert [r.project for r in store.running_invocations("beta")] == ["beta"]
+
+
+def test_legacy_v2_close_without_worktree_loads_and_renders_untagged(tmp_path: Path) -> None:
+    """A record from before CBN-EPIC-450.6 has no `worktree`: not isolated, never "not landed"."""
+    store = Store(tmp_path / "home")
+    runs = store.runs_dir("webapp")
+    runs.mkdir(parents=True)
+    (runs / "20261019T000000000Z-CBN-001.yaml").write_text(
+        "schema_version: 2\n"
+        "project: webapp\n"
+        "task_id: CBN-001\n"
+        "outcome: closed\n"
+        f"commit_sha: {'a' * 40}\n"
+        "closed_at: 2026-10-19T00:00:00Z\n"
+        "summary: before the field\n"
+        "suite:\n"
+        "  verdict: green\n"
+        "  verbs:\n"
+        "    - verb: test\n"
+        "      exit_code: 0\n"
+        "      duration: 1.0\n",
+        encoding="utf-8",
+    )
+    (loaded,) = store.list_runs("webapp")
+    assert loaded.worktree is None
+    assert outcome_cell(loaded) == "closed"
+    assert "[not landed]" not in run_bullet(loaded)
+    assert "worktree" not in format_status(loaded)

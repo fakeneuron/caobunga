@@ -4,6 +4,7 @@ import { Link, NavLink } from 'react-router-dom'
 const NAV = [
   { to: '/', label: 'Fleet' },
   { to: '/stats', label: 'Stats' },
+  { to: '/digest', label: 'Digest' },
 ]
 
 export default function Layout({ children }: { children: React.ReactNode }) {

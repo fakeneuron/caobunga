@@ -12,18 +12,22 @@ suite from a finished scope (CBN-372).
 
 from __future__ import annotations
 
+import contextlib
+import signal
 import subprocess
 import sys
+import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
+from caobunga.errors import RECEIPT_UNWRITTEN_PREFIX
 from caobunga.store import Store
 
-DEFAULT_JOBS = 3
+DEFAULT_JOBS = 4
 # The line `run` echoes after every non-`observe` invocation (`loop.execute_invocation`).
 RECEIPT_PREFIX = "invocation-record: "
 
@@ -50,7 +54,8 @@ class FleetLeg:
     slug: str
     exit_code: int
     seconds: float
-    # Set only on an exit-0 leg whose receipt says it stopped short (CBN-372).
+    # Set on an exit-0 leg whose receipt says it stopped short (CBN-372), or on a
+    # leg that printed it could not write its receipt at all (CBN-442).
     stopped_short: str | None = None
 
     @property
@@ -76,7 +81,85 @@ def _receipt_meaning(receipt_path: str) -> str | None:
         return "receipt unreadable"
     if result.successful:
         return None
-    return f"{result.status.value} ({result.stop_reason})"
+    # Each park's resume and what ran after it (CBN-443).
+    parks = "".join(f"; {park.handoff()}" for park in result.parked)
+    return f"{result.status.value} ({result.stop_reason}){parks}"
+
+
+@dataclass
+class _Children:
+    """The running `spawn_run` children, so a hangup can reach them (CBN-430).
+
+    Re-entrant: `stop` runs from a signal handler on the main thread.
+    """
+
+    procs: set[subprocess.Popen[str]] = field(default_factory=set)
+    stopping: bool = False
+    lock: threading.RLock = field(default_factory=threading.RLock)
+
+    def add(self, proc: subprocess.Popen[str]) -> None:
+        """Track `proc`; one started after `stop` is told to stop at once."""
+        with self.lock:
+            self.procs.add(proc)
+            late = self.stopping
+        if late:
+            _terminate(proc)
+
+    def discard(self, proc: subprocess.Popen[str]) -> None:
+        with self.lock:
+            self.procs.discard(proc)
+
+    def stop(self) -> None:
+        """SIGTERM every running child: each unwinds and writes its own receipt."""
+        with self.lock:
+            self.stopping = True
+            procs = list(self.procs)
+        for proc in procs:
+            _terminate(proc)
+
+
+def _terminate(proc: subprocess.Popen[str]) -> None:
+    with suppress(ProcessLookupError):
+        proc.terminate()
+
+
+_children = _Children()
+
+
+@contextlib.contextmanager
+def _hangup_guard() -> Iterator[None]:
+    """On SIGHUP or SIGTERM, forward SIGTERM to the children, then wait as for ^C (CBN-430).
+
+    A closed terminal's SIGHUP usually reaches the children too, since they
+    share the fleet's process group, but a `kill` of the fleet reaches only it;
+    left to die, it would strand them on a dead pipe. The first signal stops
+    every running child and raises `KeyboardInterrupt` into `run_fleet`'s
+    cancel-and-wait. A repeat is absorbed: raised again, it would escape that
+    wait and leave the children unwatched. ^C stays the way out. Main thread
+    only, never over an inherited `SIG_IGN`, as in `loop._interrupt_guard`.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    caught = [
+        sig
+        for sig in (signal.SIGHUP, signal.SIGTERM)
+        if signal.getsignal(sig) is not signal.SIG_IGN
+    ]
+
+    def handler(_signum: int, _frame: object) -> None:
+        if _children.stopping:
+            return
+        _children.stop()
+        raise KeyboardInterrupt
+
+    previous = {sig: signal.signal(sig, handler) for sig in caught}
+    try:
+        yield
+    finally:
+        for sig, before in previous.items():
+            signal.signal(sig, before if before is not None else signal.SIG_DFL)
+        _children.stopping = False
 
 
 def spawn_run(slug: str, on_line: Callable[[str], None]) -> int:
@@ -88,7 +171,8 @@ def spawn_run(slug: str, on_line: Callable[[str], None]) -> int:
     install the parent runs from. A failing `on_line` (a closed pipe) stops the
     forwarding, never the draining — a child blocked on a full pipe would hold
     its run lock forever. If reading the child's output raises, the child is
-    killed and reaped before the error propagates.
+    killed and reaped before the error propagates. The child is tracked while it
+    runs, so a hangup can forward to it (CBN-430).
     """
     try:
         proc = subprocess.Popen(  # noqa: S603
@@ -104,6 +188,7 @@ def spawn_run(slug: str, on_line: Callable[[str], None]) -> int:
         return 1
     forwarding = True
     try:
+        _children.add(proc)
         if proc.stdout is not None:  # always set: stdout=PIPE
             for line in proc.stdout:
                 if not forwarding:
@@ -122,6 +207,7 @@ def spawn_run(slug: str, on_line: Callable[[str], None]) -> int:
                 proc.kill()
             proc.wait()
         finally:
+            _children.discard(proc)
             if proc.stdout is not None:
                 proc.stdout.close()
 
@@ -139,22 +225,27 @@ def run_fleet(
     `echo` is called from worker threads, one whole line per call; the caller
     makes it thread-safe. Every slug gets a leg: a leg that raises is an
     `unexpected` (1) row, not a lost receipt. A child that exits 0 is checked
-    against the last receipt it named (CBN-372). On Ctrl-C the queued slugs are
+    against the last receipt it named (CBN-372); one that says it could not
+    write its receipt reads `receipt unwritten (<reason>)` (CBN-442). On Ctrl-C the queued slugs are
     cancelled — never spawned — and the running children, which got the same
-    SIGINT, are waited for before the interrupt propagates.
+    SIGINT, are waited for before the interrupt propagates. SIGHUP and SIGTERM
+    do the same after forwarding SIGTERM to the running children (CBN-430).
     """
 
     def leg(slug: str) -> FleetLeg:
         started = clock()
         receipt: str | None = None
+        unwritten: str | None = None
         echoing = True
 
         def on_line(line: str) -> None:
             # Never raises: `spawn_run` stops calling a sink that raised, and the
             # receipt line comes last, so a broken echo must not hide it.
-            nonlocal receipt, echoing
+            nonlocal receipt, unwritten, echoing
             if line.startswith(RECEIPT_PREFIX):
                 receipt = line.removeprefix(RECEIPT_PREFIX)
+            elif line.startswith(RECEIPT_UNWRITTEN_PREFIX):
+                unwritten = line.removeprefix(RECEIPT_UNWRITTEN_PREFIX)
             if echoing:
                 try:
                     echo(f"[{slug}] {line}")
@@ -168,14 +259,18 @@ def run_fleet(
                 echo(f"[{slug}] fleet: {exc!r}")
             code = 1
         short = _receipt_meaning(receipt) if code == 0 and receipt is not None else None
+        # Only on `ReceiptUnwritten`'s exit 4: a dump that quotes the marker is not one.
+        if unwritten is not None and code == 4:
+            short = f"receipt unwritten ({unwritten})"
         return FleetLeg(slug=slug, exit_code=code, seconds=clock() - started, stopped_short=short)
 
-    pool = ThreadPoolExecutor(max_workers=jobs)
-    try:
-        futures = [pool.submit(leg, slug) for slug in slugs]
-        return [future.result() for future in futures]
-    finally:
-        pool.shutdown(wait=True, cancel_futures=True)
+    with _hangup_guard():
+        pool = ThreadPoolExecutor(max_workers=jobs)
+        try:
+            futures = [pool.submit(leg, slug) for slug in slugs]
+            return [future.result() for future in futures]
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
 
 
 def fleet_exit(legs: Sequence[FleetLeg]) -> int:

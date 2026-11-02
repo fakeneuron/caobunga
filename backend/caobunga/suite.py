@@ -71,6 +71,7 @@ def run_suite(
     *,
     run: RunFn | None = None,
     on_wait: Callable[[], None] | None = None,
+    on_verb: Callable[[str], None] | None = None,
 ) -> SuiteRun:
     """Run every fleet verb in `VERBS` order against `repo`; refusals are results.
 
@@ -80,27 +81,34 @@ def run_suite(
     spawn — never queues. `on_wait` is called when a verb must block. A home
     that cannot take the lock (an `flock`-less mount) runs the suite
     unserialized rather than raise — measuring the close outranks keeping it
-    off a busy host.
+    off a busy host. `on_verb` names each fleet verb (`test`) as it starts, for
+    the post-close `progress:` heartbeat (CBN-EPIC-449.5).
     """
 
     def guard() -> contextlib.AbstractContextManager[None]:
         return _spawn_lock(store, on_wait)
 
-    results = [_measure(verb, repo, store, run, guard) for verb in VERBS]
+    def measure(verb: str) -> SuiteResult:
+        if on_verb is not None:
+            on_verb(VERBS[verb][-1])
+        return _measure(verb, repo, store, run, guard)
+
+    results = [measure(verb) for verb in VERBS]
     verbs = [_to_verb(result) for result in results]
     suite = Suite.from_verbs(verbs)
     log = "\n\n".join([f"verdict: {suite.verdict.value}", *(r.render() for r in results)]) + "\n"
     return SuiteRun(suite=suite, log=log)
 
 
-def echo_line(suite: Suite) -> str:
+def echo_line(suite: Suite, label: str = "suite") -> str:
     """`suite: green — test 0 98.4s · lint 0 3.1s · typecheck 0 6.6s`.
 
     The one loop echo for this step, shaped like `foreign:`: the record
     already carries every fact, this is the operator's glance at the drain.
+    The pre-launch baseline (CBN-420) prints the same line as `baseline:`.
     """
     parts = (f"{verb.verb} {_exit_word(verb)} {verb.duration:.1f}s" for verb in suite.verbs)
-    return f"suite: {suite.verdict.value} — {' · '.join(parts)}"
+    return f"{label}: {suite.verdict.value} — {' · '.join(parts)}"
 
 
 def suite_stops(run: RunRecord) -> bool:

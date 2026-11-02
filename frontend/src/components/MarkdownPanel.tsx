@@ -15,7 +15,7 @@ export default function MarkdownPanel({
           {body}
         </pre>
       ) : (
-        <p className="px-4 py-3 text-sm text-slate-400">No report yet.</p>
+        <p className="px-4 py-3 text-sm text-slate-500">No report yet.</p>
       )}
     </section>
   )

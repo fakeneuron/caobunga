@@ -20,6 +20,12 @@ from pathlib import Path
 
 _SUMMARY_MAX = 500
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+_TERMINAL_ESCAPE = re.compile(
+    r"(?:\x1b\]|\x9d)[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)"  # OSC, including hyperlinks
+    r"|(?P<forward>(?:\x1b\[|\x9b)[0-9]*C)"  # cursor-forward supplies spacing
+    r"|(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]"  # other CSI, including colour
+    r"|\x1b[ -/]*[0-~]"  # charset selection and other ESC sequences
+)
 
 
 def read_text_or_none(path: Path) -> str | None:
@@ -39,15 +45,27 @@ def strip_ansi(text: str) -> str:
     return _ANSI.sub("", text)
 
 
-def clip(text: str) -> str:
-    """Collapse whitespace and cap at `_SUMMARY_MAX`, truncating on a word boundary.
+def normalize_terminal_line(line: str) -> str:
+    """Plain words for one captured worker line; not a terminal screen emulator.
+
+    Drop complete presentation escapes, treating cursor-forward as a word
+    separator, then collapse Unicode whitespace. Call after stream compaction,
+    before tail capture, so all readers see the same text without altering logs.
+    """
+    plain = _TERMINAL_ESCAPE.sub(lambda match: " " if match["forward"] else "", line)
+    return " ".join(plain.split())
+
+
+def clip(text: str, *, limit: int = _SUMMARY_MAX) -> str:
+    """Collapse whitespace and cap at `limit`, truncating on a word boundary.
 
     One cap for every narrative read: a proposed follow-up is a PLAN row an
     operator will paste, so it earns the same budget the summary lede gets —
-    public so that reuse does not grow a second constant.
+    public so that reuse does not grow a second constant. `limit` is for a
+    one-line echo that must stay shorter (the `progress:` heartbeat).
     """
     collapsed = " ".join(text.split())
-    if len(collapsed) <= _SUMMARY_MAX:
+    if len(collapsed) <= limit:
         return collapsed
-    truncated = collapsed[:_SUMMARY_MAX].rsplit(" ", 1)[0]
+    truncated = collapsed[:limit].rsplit(" ", 1)[0]
     return f"{truncated}…"

@@ -34,6 +34,7 @@ from caobunga.flaitron import (
     list_open_tasknotes,
     marker_drift,
     open_task_ids,
+    park_commits,
     parse_blocked_by,
     parse_plan,
     pick_next,
@@ -44,6 +45,7 @@ from caobunga.flaitron import (
     supports_unattended,
     try_read_project,
     unattended_module_rel,
+    unfenced_comments,
     unparsed_blocked_clause,
     unparsed_plan_rows,
 )
@@ -145,6 +147,69 @@ def test_parse_skips_fenced_examples_and_pre_heading_rows() -> None:
 """
     tasks = parse_plan(md)
     assert [t.task_id for t in tasks] == ["CBN-002"]
+
+
+def test_fenced_comment_opener_does_not_swallow_the_plan() -> None:
+    """CBN-408. A `<!--` on a fenced line opens no comment, so it cannot pair
+    with a later live `-->` and blank the rows between them."""
+    md = """## High
+
+```markdown
+<!-- unclosed example
+```
+
+- [ ] **CBN-002** [light] | real — kept.
+
+<!-- a live note -->
+"""
+    assert [t.task_id for t in parse_plan(md)] == ["CBN-002"]
+
+
+def test_fence_delimiter_comments_are_literal_text() -> None:
+    """CBN-408 review. CommonMark: a `<!--` on a fence opener or closer is fence
+    text, not a comment, and the reader and `unfenced_comments` agree on it."""
+    info = "## High\n\n```markdown <!-- example\nx\n```\n\n"
+    info += "- [ ] **CBN-002** [light] | kept.\n\n<!-- live -->\n"
+    assert [t.task_id for t in parse_plan(info)] == ["CBN-002"]
+    assert unfenced_comments(info) == [" live "]
+    closer = "## High\n\n```\ncode\n``` <!-- note -->\n- [ ] **CBN-001** [light] | fenced.\n```\n"
+    assert parse_plan(closer) == []
+    assert unfenced_comments(closer) == []
+    # A backtick in a backtick fence's info string makes it no opener, so this
+    # comment is live and the row parses; the bare ``` below opens the fence.
+    opener = "## High\n\n``` <!-- `x` -->\n- [ ] **CBN-001** [light] | kept.\n```\n"
+    opener += "<!-- fenced -->\n"
+    assert [t.task_id for t in parse_plan(opener)] == ["CBN-001"]
+    assert unfenced_comments(opener) == [" `x` "]
+
+
+def test_code_span_comment_opener_is_literal_text() -> None:
+    """CBN-409. A `<!--` inside an inline code span opens no comment, so it
+    cannot pair with a later live `-->` and blank the rows between them."""
+    md = "## High\n\n- [ ] **CBN-001** [light] | mentions `<!--` in code.\n"
+    md += "- [ ] **CBN-002** [light] | kept.\n\n<!-- live -->\n"
+    assert [t.task_id for t in parse_plan(md)] == ["CBN-001", "CBN-002"]
+    assert unfenced_comments(md) == [" live "]
+    # A live comment after the span on the same line still opens, and a backtick
+    # inside it cannot pair with one after it to hide the next opener.
+    same_line = "`<!--` <!-- a ` b --> `x` <!-- c -->\n"
+    assert unfenced_comments(same_line) == [" a ` b ", " c "]
+    # An unmatched backtick is no code span, so the opener stays live; a span
+    # closes only on a run of its own length.
+    assert unfenced_comments("` <!-- d -->\n") == [" d "]
+    assert unfenced_comments("`` ` <!-- `` <!-- e -->\n") == [" e "]
+    # An escaped backtick opens no span; a backslash inside one escapes nothing.
+    assert unfenced_comments("\\`<!-- f --> \\`\n") == [" f "]
+    assert unfenced_comments("`\\` <!-- g -->\n") == [" g "]
+
+
+def test_line_break_inside_a_comment_keeps_row_numbers() -> None:
+    """CBN-408 review. Blanking keeps every `splitlines` break, so a `\\r` in a
+    comment cannot shift the rows after it."""
+    md = "## High\n\n<!-- a\rb -->\n- [ ] **CBN-002** [light] | kept.\n"
+    (task,) = parse_plan(md)
+    assert task.text == "- [ ] **CBN-002** [light] | kept."
+    assert task.line == md.splitlines().index(task.text) + 1
 
 
 def test_parse_grammar_tolerances() -> None:
@@ -725,6 +790,34 @@ def test_supports_unattended_needs_the_module(tmp_path: Path) -> None:
 
 def test_supports_unattended_missing_skill_file(tmp_path: Path) -> None:
     assert supports_unattended(_pin(tmp_path, skill=None)) is False
+
+
+def _committing_pin(tmp_path: Path, module_text: str) -> Path:
+    root = _pin(tmp_path, skill=_CAPABLE_SKILL)
+    (root / FT_TASK_SKILL_DIR_REL / UNATTENDED_MODULE).write_text(module_text, encoding="utf-8")
+    return root
+
+
+def test_park_commits_reads_the_recipe_step(tmp_path: Path) -> None:
+    """v8.1.0's recipe heads its commit step `Lone-park commit` (CBN-459)."""
+    root = _committing_pin(tmp_path, "## The park recipe\n4. **Lone-park commit.** Run…\n")
+    assert park_commits(root) is True
+
+
+def test_park_commits_false_on_pre_commit_recipe(tmp_path: Path) -> None:
+    """A v7.x recipe parks but never commits: capable, yet the park holds the repo."""
+    root = _committing_pin(tmp_path, "## The park recipe\n4. Emit one inline marker\n")
+    assert supports_unattended(root) is True
+    assert park_commits(root) is False
+
+
+def test_park_commits_false_without_unattended(tmp_path: Path) -> None:
+    """A `--fast`-degraded pin has no park recipe, even if the text is on disk."""
+    root = _pin(tmp_path, skill=_SUB_FLOOR_SKILL)
+    (root / FT_TASK_SKILL_DIR_REL / UNATTENDED_MODULE).write_text(
+        "Lone-park commit\n", encoding="utf-8"
+    )
+    assert park_commits(root) is False
 
 
 def test_supports_unattended_no_flaitron_core(tmp_path: Path) -> None:
@@ -1654,6 +1747,7 @@ FRONTIER_PLAN = """# sample
 - [ ] **CBN-001** [frontier] [unattended] | band — chooser-assignable upstream, not here.
 - [ ] **CBN-002** [fable] [unattended] | concrete — frontier-band model.
 - [ ] **CBN-003** [mythos] [unattended] | concrete — its limited-access sibling.
+- [ ] **CBN-005** [astra] [unattended] | concrete — runner-cap name (CBN-448).
 - [ ] **CBN-004** [heavy] [unattended] | routine — the reachable head.
 """
 
@@ -1672,11 +1766,11 @@ def test_frontier_band_never_dispatches() -> None:
 def test_frontier_denial_names_the_token_and_outranks_the_marker() -> None:
     """Every row is marked, so the reason must not be `marked` or `unmarked`."""
     result = coverage(parse_plan(FRONTIER_PLAN))
-    assert (result.open, result.marked, result.denied) == (4, 1, 3)
+    assert (result.open, result.marked, result.denied) == (5, 1, 4)
     assert [d.reason for d in result.denials] == [
         f"frontier — [{token}] is operator-authorized; "
         "caobunga caps dispatch at [heavy], stricter than flaitron's [frontier]"
-        for token in ("frontier", "fable", "mythos")
+        for token in ("frontier", "fable", "mythos", "astra")
     ]
     assert all(d.seeded_line is None for d in result.denials)
 
@@ -2175,6 +2269,61 @@ HEAVY_AND_KEYWORD_PLAN = """# sample
 """
 
 
+def test_moderate_and_legacy_medium_pass_clause_1() -> None:
+    """CBN-416: `[moderate]` is the v7.4 name; legacy `[medium]` stays admitted."""
+    plan = """## High
+
+- [ ] **CBN-501** [moderate] | alias — rename a token.
+- [ ] **CBN-502** [medium] | legacy — keep the old token.
+- [ ] **CBN-503** [heavy] | design — too broad to dispatch blind.
+"""
+    by_id = {d.task_id: d for d in coverage(parse_plan(plan)).denials}
+    assert by_id["CBN-501"].triage_reason == "keyword — a miss is not a semantic pass"
+    assert by_id["CBN-502"].triage_reason == "keyword — a miss is not a semantic pass"
+    assert by_id["CBN-503"].triage_reason == (
+        "model — [heavy] needs a complete, operator-confirmed readiness basis (starter tasknote)"
+    )
+
+
+def test_clause_1_tiers_concrete_names() -> None:
+    """CBN-451 (v8.2.0): a concrete name reads by its inherent tier."""
+    plan = """## High
+
+- [ ] **CBN-511** [haiku] | light-name — rename a token.
+- [ ] **CBN-512** [sonnet] | moderate-name — rename a token.
+- [ ] **CBN-513** [sol] | moderate-name — rename a token.
+- [ ] **CBN-514** [opus] | heavy-name — design a seam.
+- [ ] **CBN-515** [gpt-5] | multi-band — rename a token.
+- [ ] **CBN-516** [grok] | moderate-name — rename a token.
+- [ ] **CBN-517** [codex] | moderate-name — rename a token.
+- [ ] **CBN-519** [sonnet] [opus] | stacked — design a seam.
+"""
+    by_id = {d.task_id: d for d in coverage(parse_plan(plan)).denials}
+    for task_id in ("CBN-511", "CBN-512", "CBN-513", "CBN-516", "CBN-517"):
+        assert by_id[task_id].triage_reason == "keyword — a miss is not a semantic pass"
+    assert by_id["CBN-514"].triage_reason == (
+        "model — [opus] needs a complete, operator-confirmed readiness basis (starter tasknote)"
+    )
+    assert by_id["CBN-519"].triage_reason == (
+        "model — [opus] needs a complete, operator-confirmed readiness basis (starter tasknote)"
+    )
+    assert by_id["CBN-515"].triage_reason == (
+        "model — [gpt-5] is not [light]/[moderate] (legacy [medium]) or a name of that tier"
+    )
+
+
+def test_keyword_screen_skips_backticked_spans() -> None:
+    """CBN-451 (v8.2.0): a backticked span names a thing; bare text still trips."""
+    plan = """## High
+
+- [ ] **CBN-521** [light] | doc-path — fix a typo in `docs/MIGRATION.md`.
+- [ ] **CBN-522** [light] | bare-path — fix a typo in docs/MIGRATION.md.
+"""
+    by_id = {d.task_id: d for d in coverage(parse_plan(plan)).denials}
+    assert by_id["CBN-521"].triage_reason == "keyword — a miss is not a semantic pass"
+    assert by_id["CBN-522"].triage_reason == "keyword — description mentions 'migration'"
+
+
 def test_needs_judgment_on_heavy_model_and_keyword_screen() -> None:
     """Clause 1 (tier) and clause 3's free-text keyword screen (no formal [handoff])."""
     by_id = {d.task_id: d for d in coverage(parse_plan(HEAVY_AND_KEYWORD_PLAN)).denials}
@@ -2371,6 +2520,7 @@ FACADE = frozenset(
         "OpenTasknote",
         "PARENT_EPIC",
         "PARK_SEPARATOR",
+        "PARK_UNCOMMITTED",
         "PLAN_REL",
         "PlanPriority",
         "PlanTask",
@@ -2390,6 +2540,7 @@ FACADE = frozenset(
         "XHEAVY_TOKEN",
         "completed_task_ids",
         "coverage",
+        "denied_rows",
         "dispatchable",
         "eligibility",
         "epic_parent",
@@ -2403,6 +2554,7 @@ FACADE = frozenset(
         "list_open_tasknotes",
         "marker_drift",
         "open_task_ids",
+        "park_commits",
         "parse_blocked_by",
         "parse_plan",
         "phase_progress",
@@ -2412,9 +2564,12 @@ FACADE = frozenset(
         "read_project",
         "seeded_line",
         "split_park_reason",
+        "suggested_next",
         "supports_unattended",
+        "tasknote_touches",
         "try_read_project",
         "unattended_module_rel",
+        "unfenced_comments",
         "unparsed_blocked_clause",
         "unparsed_plan_rows",
     }
@@ -2493,12 +2648,15 @@ IMPORTER_NAMES = {
     },
     "launch": {
         "NextTask",
+        "PARK_UNCOMMITTED",
         "list_open_tasknotes",
+        "park_commits",
         "pinned_skill_rel",
         "supports_unattended",
+        "try_read_project",
         "unattended_module_rel",
     },
-    "finish": {"NextTask"},
+    "finish": {"NextTask", "is_descoped", "try_read_project"},
     "wait": {"PLAN_REL", "TASKNOTE_DIR_REL", "phase_progress"},
     "report": {"PLAN_REL"},
     "close": {
@@ -2517,7 +2675,7 @@ IMPORTER_NAMES = {
         "read_project",
         "split_park_reason",
     },
-    "git": {"TASKNOTE_DIR_REL"},
+    "git": {"TASKNOTE_DIR_REL", "tasknote_touches"},
     "presence": {
         "NextTask",
         "OpenTasknote",
@@ -2528,9 +2686,15 @@ IMPORTER_NAMES = {
         "pick_next",
     },
     "api": {"Coverage", "ProjectRead", "try_read_project"},
-    "cli": {"marker_drift", "try_read_project"},
+    "cli": {"PARK_UNCOMMITTED", "marker_drift", "park_commits", "try_read_project"},
     "status_render": {"PLAN_REL", "Coverage", "Denial", "TriageClass"},
-    "rollup": {"PARENT_EPIC", "epic_parent", "parse_plan"},
+    "rollup": {
+        "PARENT_EPIC",
+        "TASK_ID_BODY",
+        "epic_parent",
+        "parse_plan",
+        "unfenced_comments",
+    },
 }
 
 
@@ -2669,3 +2833,61 @@ def test_every_imported_name_resolves_on_the_facade() -> None:
     assert imported <= FACADE
     for name in sorted(imported):
         assert hasattr(flaitron, name), name
+
+
+# --- retained dimension (CBN-EPIC-450.5) ---
+
+
+def test_retained_row_is_denied_first_and_skipped_on_unattended_pick(tmp_path: Path) -> None:
+    """An id on a retained `wt-<ID>` branch is never re-picked headless, and the
+    denial names the branch ahead of a parked note's own reason."""
+    root = _repo(tmp_path, MARKED_PLAN, {"CBN-011": _parked("drift — premise contradicted")})
+    result = read_project(root, unattended=True, drain=True, retained={"CBN-011"})
+    assert result.candidate is not None
+    assert result.candidate.task_id == "CBN-012"
+    assert [(d.task_id, d.reason) for d in result.denied] == [
+        (
+            "CBN-011",
+            "retained — wt-CBN-011 exists and is not landed on main; "
+            "inspect it attended before redispatching",
+        )
+    ]
+    assert result.denied[0].seeded_line is None
+    assert result.coverage.marked_tasks == ["CBN-012"]
+    assert result.coverage.marked + result.coverage.denied == result.coverage.open
+
+
+def test_retained_is_ignored_on_attended_reads_and_unknown_ids(tmp_path: Path) -> None:
+    root = _repo(tmp_path, MARKED_PLAN)
+    attended = read_project(root, retained={"CBN-011"})
+    assert attended.candidate is not None
+    assert attended.candidate.task_id == "CBN-011"
+    assert attended.denied == []
+    elsewhere = read_project(root, unattended=True, retained={"OTHER-1"})
+    assert elsewhere.candidate is not None
+    assert elsewhere.candidate.task_id == "CBN-011"
+    assert elsewhere.denied == []
+
+
+def test_retained_denies_the_gated_in_progress_override(tmp_path: Path) -> None:
+    """The override is a dispatch preference, so `retained` applies to it too."""
+    root = _repo(tmp_path, MARKED_PLAN, {"CBN-012": _note("in-progress")})
+    result = read_project(root, unattended=True, retained={"CBN-012"})
+    assert result.candidate is not None
+    assert result.candidate.task_id == "CBN-011"
+    assert result.candidate.reason == "spec-selection"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("---\nstatus: x\ntouches:\n  - a.py\n  - 3\n  - ' b/ '\n---\n", ["a.py", "b/"]),
+        ("---\nstatus: x\n# touches:\n#   - a.py\n---\n", []),
+        ("---\ntouches: a.py\n---\n", []),
+        ("---\ntouches: [unclosed\n---\n", []),
+        ("no frontmatter\n", []),
+    ],
+)
+def test_tasknote_touches_is_skip_not_fail(text: str, expected: list[str]) -> None:
+    """CBN-452: `touches:` only widens a footprint, so anything unreadable is `[]`."""
+    assert flaitron.tasknote_touches(text) == expected

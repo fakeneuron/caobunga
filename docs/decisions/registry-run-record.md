@@ -89,13 +89,22 @@ Hermes then retired whole: once the review goes, the brief has no other reader, 
 
 **Retired (CBN-258, 2026-09-24).** The Hermes post-commit review, its brief, cadence window, and verdict delivery are gone; the loop writes none of the four `hermes_*` fields. They stay on the model as optional legacy keys so records written before the retire still load, and the digest (§"Daily fleet digest") and status UI still render them where present. No schema bump: removing a *write* of optional fields changes nothing a v2 reader asserts (§"Compatibility").
 
+**Legacy field rows (moved from CONTRACT at CBN-EPIC-450.6).** CONTRACT's run-record table now points each `hermes_*` row at §"Hermes review" to make room within its word budget. The rows' full text, verbatim, including each omit rule:
+
+| Field | Type | Required | Source | Why |
+|---|---|---|---|---|
+| `hermes_review` | enum | no | orchestrator | **Legacy (CBN-258): read, never written.** Whether this close got a Hermes review. See Hermes review below |
+| `hermes_verdict` | string | no | Hermes stdout | **Legacy (CBN-258).** *What the reviewer said* — its stdout whitespace-collapsed and clipped like `summary`. The full answer is the `reviews/` copy. See Hermes review below. Omit when no review launched or it said nothing |
+| `hermes_verdict_code` | enum | no | Hermes stdout, parsed | **Legacy (CBN-258).** `accept` / `reject` / `inconclusive` — the reviewer's fixed first line, parsed. See Hermes review below. Omit on the same rule as `hermes_verdict`: no review launched, or it said nothing |
+| `hermes_missing_servers` | list of string | no | Hermes stdout, parsed | **Legacy (CBN-258).** The `REVIEW_MCP_SERVERS` names Hermes reported unknown on this launch. See Hermes review below. Set exactly when `hermes_review` is `degraded`; omit otherwise |
+
 ## Suite — missing recipe reclassified as `refused` (CBN-211)
 
 a fleet repo's `CORE-12` (2026-09-20) stopped the only `proceed-on-green` drain as `red` because its justfile had `check:`, not `typecheck:` — `just` exits 1 with `justfile does not contain recipe`. The repo could not answer the verb, which is a fleet-layer gap, not a code failure, so that one exit reclassifies as `refused`. The same incident motivated the no-alias rule in `CONTRACT.md` §"Suite fitness preflight" (CBN-215).
 
 ## External review — why the field exists (CBN-257)
 
-CBN-242 retired the Hermes post-commit review in favor of Flaitron's Phase 3 `**External review**` box: over 13 post-bump headless closes the in-run review caught two blockers and Hermes caught nothing (§"Hermes review — retire verdict" above). That left one thing Hermes did that the box alone does not: saying, on a caobunga surface, whether the review happened at all. `codex` has never been dispatched, so nobody has seen whether it runs one — the field makes a skipped review a value rather than silence.
+CBN-242's verdict retired (and CBN-258 removed) the Hermes post-commit review in favor of Flaitron's Phase 3 `**External review**` box: over 13 post-bump headless closes the in-run review caught two blockers and Hermes caught nothing (§"Hermes review — retire verdict" above). That left one thing Hermes did that the box alone does not: saying, on a caobunga surface, whether the review happened at all. `codex` has never been dispatched, so nobody has seen whether it runs one — the field makes a skipped review a value rather than silence.
 
 ## Run record — skip-not-fail, and why the registry is strict (CBN-106)
 
@@ -112,6 +121,8 @@ A prose-only section correctly reports nothing: two archived audits open their f
 Caobunga never seeds and Flaitron never writes the marker, so a worker-filed row is unmarked by construction — unless the worker writes the marker itself, which the drain pin (CBN-246) refuses to dispatch in the same invocation. The figure earns its place by *stating*, per run, that every discovery a drain made needs an operator act before anything can dispatch it — and it stays correct when the operator seeds mid-drain.
 
 The one snapshot that could not carry `new_rows` was `loop`'s pre-launch refusal of an already-`blocked` note, retired by CBN-252: nothing ran, so there was nothing to measure and the field stayed absent.
+
+**Escalations measure the same diff (CBN-436).** `_failed_from_worker` used to build the failure snapshot without `new_rows`, so a worker that filed and died left the field unset and the next dirty-tree refusal (CBN-435) named a generic dirty tree. It now runs `diff_new_rows` against the launch baseline, the working-tree read a close and a park already use. That first read is before the settle grace. A timeout's worker can still file during it, so `refresh_tree` runs the diff again after the session is stopped, beside the `tree:` re-read. An unreadable PLAN on the first read degrades to unset rather than dropping the failure record; an unreadable re-read keeps the first measure.
 
 ## Eligibility reason — not the picker why-log
 
@@ -143,6 +154,10 @@ The CBN-335 live trial found that no dispatch path starts a micro note, so CBN-3
 
 Importing Flaitron's park-code set would make a Flaitron release a Caobunga contract change — the same reciprocal-record stance `CONTRACT.md` §"Fleet boundary" takes toward Fleet HQ. Since CBN-252 retired the refusal to launch a note that was already `blocked`, the mid-run classification is the one park site; records from before carry `park_reason` from both.
 
+## Park reason — prose on its own field (CBN-448)
+
+Flaitron v8.2.0's caller contract (`docs/EXTERNAL-AGENTS.md` step 4) says `drift` and `input-needed` prose ends in the one question the resuming operator must answer, and `out-of-scope` prose names the stray paths or the line count. A caller may show it verbatim and must never branch on it. Before CBN-448 the prose reached only `summary`, after a `tasknote parked (status: blocked):` lede, and the `parked:` handoff line (receipt echo, last-run card, `fleet`'s stopped-short cell) printed only the code. So the surface an operator reads after a drain never carried the question. A separate optional `park_prose` lets the receipt and the handoff line carry the text without parsing it back out of `summary`. `summary` keeps the lede plus prose unchanged, so older readers see no difference. Being optional, the field is not a `schema_version` bump (CONTRACT §"Compatibility").
+
 ## Registry — case-insensitive path match (CBN-131)
 
 `Path.resolve()` does not normalize case, and macOS preserves case without distinguishing it, so `~/Code/foo` and a record written as `~/code/foo` are the same repo. `register` therefore merges them rather than letting them collide, and the in-repo skill matches them as one.
@@ -150,3 +165,57 @@ Importing Flaitron's park-code set would make a Flaitron release a Caobunga cont
 ## Invocation — why the grouping key (CBN-EPIC-12.6)
 
 `gated` writes one record and `proceed-on-green` one per drained task, and nothing else in the record separated those, so reading a flat history meant doing arithmetic on `closed_at` gaps to guess where one drain ended (CBN-EPIC-12.6 F3). The **cohort** half of that finding needs no field — `flaitron.epic_stem` derives an epic's cohort key from `task_id`.
+
+## Execution tiers — headless launch rationale (CBN-411)
+
+> Extracted from CONTRACT at CBN-411. This passage preserves the explanation and its original rule context; CONTRACT is authoritative for current rules. Unlinked section references in this excerpt refer to CONTRACT.
+
+**Every launching tier requires the `[unattended]` marker (CBN-118).** The rows are a ladder for *how much* runs before the loop stops, and nothing else. They are not a ladder for *what may be picked*: `gated` and `proceed-on-green` both consult the marker (§"Flaitron reader"), because both dispatch a **headless** worker — `worker_message` sends `--unattended` / `--fast` at every tier (§"Run loop"), and `gated`'s stop lands *after* the worker's closure commit, not before it. `observe` asks nothing because it launches nothing.
+
+## Suite — closure predicate and single-write rationale (CBN-411)
+
+> Extracted from CONTRACT at CBN-411. This passage preserves the explanation and its original rule context; CONTRACT is authoritative for current rules. Unlinked section references in this excerpt refer to CONTRACT.
+
+**Required exactly when a closure commit exists, forbidden otherwise.** `suite` is present on `closed` / `de-scoped` / `no-tasknote` and absent on `blocked` / `failed` — a park or a failure leaves no closed tree to measure. `close.inspect_close` sets `commit_sha` on all three closure outcomes unconditionally (the closure commit, §"Run loop" → "Continue prompt" close-detection steps), so the outcome set and "a closure commit exists" are one predicate (`models.CLOSURE_OUTCOMES`). The model asserts **both** directions at `schema_version` 2, which is what the bump buys (§"Compatibility"): on a v2 close, a missing `suite` is a record that was never written, never "not measured". Records at `schema_version` 1 predate the field and load unchanged; a reader that needs a v1 record's suite treats absence as *unknown*, never as `green`. It rides the **single** write — the suite runs after the worker settles and before the record is written (§"Run loop" → "Deterministic suite", CBN-EPIC-202.3) — so no rewrite adds it later.
+
+## Escalation reasons — final-tree and mismatch reporting rationale (CBN-411)
+
+> Extracted from CONTRACT at CBN-411. This passage preserves the explanation and its original rule context; CONTRACT is authoritative for current rules. Unlinked section references in this excerpt refer to CONTRACT.
+
+**`worker-exited`, `timeout`, and `closed` fold a tree snapshot into `summary` (CBN-171, CBN-184).** `git.tree_after` appends one `tree: N file(s) left (…)` line to `summary`, reusing the `git status --porcelain -uall` read and `DIRT_SAMPLE` clip, plus whether the candidate's own `.flaitron/tasknote/{task_id}.md` is still open. Since CBN-452 the line also splits off dirt outside the worker's footprint (run-window commit paths, the note's `touches:` and own path, `.flaitron/PLAN.md` / `PLAN-ARCHIVE.md` — not all of `.flaitron/`, where a concurrent session's own note lands) as `K outside worker footprint: …`: NAT-510's record had named a concurrent session's `docs/PORT-REGISTRY.md` as its own residue. CBN-457 hardens the split: the clause is placed first in the parenthetical so a tail cut spares it; a foreign window commit (`close.split_window_commits`) contributes no paths to the footprint, so its later re-edit reads outside; `touches:` matches a leading `./` and a segment-leading `**/`. The label says "outside footprint", not "foreign", because git cannot attribute an uncommitted write; the invocation receipt's `tree` list stays raw porcelain. The same fold applies to a `closed` (and `de-scoped`) outcome's summary. The line is the tree as it stands once the worker is stopped: the worker is shut down after settle and suite, and the line is read again just before the record is written. Anything the suite's own verbs left counts too, since it is the same dirt the next dispatch refuses on (CBN-352). Why: [decisions/registry-run-record.md](registry-run-record.md) §"Escalation reasons — tree snapshot fold (CBN-171, CBN-184)". Report-only in all three cases: the *next* invocation's dirty-tree refusal stays `_refuse_if_dirty`'s own fresh read, unaffected by this field. The other five escalation reasons carry no tree line. A `worker-exited` summary also names a mismatch (CBN-328) when the candidate's open tasknote carries a `park-reason:` but its `status:` is not `blocked` — `park-reason present but status in-progress, not blocked`, placed ahead of the tree line. Report-only: the exit stays `failed` / `worker-exited`, never a park.
+
+## External review — operator micro opt-in rationale (CBN-411)
+
+> Extracted from CONTRACT at CBN-411. This passage preserves the explanation and its original rule context; CONTRACT is authoritative for current rules. Unlinked section references in this excerpt refer to CONTRACT.
+
+**Dispatch never starts a micro note (CBN-338).** Every prompt shape in §"Run loop" carries `--unattended` or `--fast` and never `--micro`, and no PLAN tag maps to it. Flaitron makes `--micro` an operator's explicit opt-in, and `[light]` is a model tier, not a ceremony tier. A micro note reaches this reader only after an operator opted in. That means a hand run, or a continue prompt on an `in-progress` micro note the operator started. A parked one is denied at pick (`parked`, CBN-252), so dispatch never resumes it. Why: [decisions/registry-run-record.md](registry-run-record.md) §"External review — micro notes and dispatch (CBN-338)".
+
+## Follow-up capture — prompt and producer boundary (CBN-460)
+
+Context relocated from CONTRACT; current rules remain there. Unlinked section references and positional wording refer to the original CONTRACT context.
+
+**Asking is not requiring, and the prompt now asks (CBN-138.2).** `worker_message` cues the worker to file follow-ups via `/ft-file-task --unattended` (unprobed since the flaitron v7 hard cut, CBN-330); the read side is unchanged by it — `_FOLLOWUP_HEADING` is still the tolerant prefix family, and a worker that ignores the cue is captured exactly as before. `### Follow-ups proposed` remains a caobunga-originated spelling — one caobunga may *ask its own dispatched worker* for (the pre-v7 degraded cue did, until CBN-330 retired it), and may not *require* of any producer. Why asking is not a boundary violation: [decisions/registry-run-record.md](registry-run-record.md) §"Follow-up capture — asking is not requiring (CBN-138.2)". The cue rides every prompt shape (§"Run loop", §"Continue prompt") because every launching tier dispatches headless (CBN-118).
+
+## Marked-set baseline — observation rationale (CBN-460)
+
+Context relocated from CONTRACT; current rules remain there. Unlinked section references and positional wording refer to the original CONTRACT context.
+
+**This is not the cached classification the constitution rules out.** Current coverage is still derived per read on every surface (§"Marker coverage"); this field records what **one past run observed**, read as history by exactly one caller. Why that distinction holds: [decisions/registry-run-record.md](registry-run-record.md) §"Marked-set baseline — not a cached classification".
+
+## New-row detection — filed discovery rationale (CBN-460)
+
+Context relocated from CONTRACT; current rules remain there. Unlinked section references and positional wording refer to the original CONTRACT context.
+
+A worker cued to file a follow-up (§"Follow-up capture" → *Asking is not requiring*) writes it into the target's own `PLAN.md`. §"Follow-up capture" closed the half where a discovery was *proposed* in a tasknote nobody reads; this closes the half where it was actually **filed** and still nothing said so. `close.inspect_close` diffs the task ids its close-side `read_project` returns against `baseline` — the id set the run's **pre-flight** read saw — and the difference rides the record as `new_rows` (CBN-138.3).
+
+## New-row detection — row-order rationale (CBN-460)
+
+Context relocated from CONTRACT; current rules remain there. Unlinked section references and positional wording refer to the original CONTRACT context.
+
+**Every parsed row counts, not just the open launch queue** — a row filed into `## Future Opportunities` is still a discovery. State it, refuse nothing. Rows appear in `parse_plan` document order rather than dispatch order, because these are rows to read, not a worklist to seed down.
+
+## Follow-up capture — narrative-field rationale (CBN-460)
+
+Context relocated from CONTRACT; current rules remain there. Unlinked section references and positional wording refer to the original CONTRACT context.
+
+**Narrative, not a decision.** Nothing dispatches, denies, routes, or refuses on this field, and Caobunga never files a follow-up into a PLAN — filing stays the operator's act, the same boundary §"Marker coverage" draws around marker seeding. `null` rather than `[]` when a note proposed none, so `exclude_none` keeps the key off records with nothing to say; the normalizer follows `RegistryRecord.providers` (an empty declaration is undeclared). Optional at `schema_version` 1 per §"Compatibility" — records written before it load unchanged.

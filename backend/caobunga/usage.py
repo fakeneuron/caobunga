@@ -15,6 +15,8 @@ from typing import cast
 
 from pydantic import BaseModel, ConfigDict
 
+from caobunga.spawn import run_detached
+
 WhichFn = Callable[[str], str | None]
 RunFn = Callable[[Sequence[str]], str]
 
@@ -190,14 +192,15 @@ def first_binary(provider: str, which: WhichFn) -> str | None:
 
 
 def run_argv(argv: Sequence[str], timeout: float) -> str:
-    result = subprocess.run(  # noqa: S603
-        list(argv),
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
-    if result.returncode != 0:
-        msg = f"dump exited {result.returncode}"
+    """Run a probe command through `spawn.run_detached`.
+
+    Same rules as the suite (CBN-174 / CBN-EPIC-314.2 / CBN-349): stdin is
+    `DEVNULL`, output decodes with `errors="replace"`, and a timeout or interrupt
+    kills the child's whole process group. stderr is discarded so only stdout is
+    parsed (CBN-398).
+    """
+    code, stdout = run_detached(argv, None, timeout, merge_stderr=False)
+    if code != 0:
+        msg = f"dump exited {code}"
         raise RuntimeError(msg)
-    return result.stdout
+    return stdout

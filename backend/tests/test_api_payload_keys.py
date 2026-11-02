@@ -37,13 +37,17 @@ from caobunga.models import (
     ForeignCommit,
     HermesReview,
     HermesVerdictCode,
+    LandingState,
     NewRow,
     Outcome,
     RegistryRecord,
+    RetainedWorktree,
     RunRecord,
+    StaleReceipt,
     Suite,
     SuiteVerb,
     SuiteVerdict,
+    WorktreeRun,
 )
 from caobunga.presence import DirtLine
 from caobunga.store import Store
@@ -104,7 +108,8 @@ def api_client(caobunga_home: Path) -> TestClient:  # noqa: ARG001
 
 def _register_maximal(home: Path, project_id: str, path: Path) -> RegistryRecord:
     """A registration with every optional `RegistryRecord` field set, so the
-    endpoint's top-level dict carries `provider` / `model` / `providers` too."""
+    endpoint's top-level dict carries `provider` / `model` / `providers` and
+    `bootstrap` / `bootstrap_timeout` / `isolate` too."""
     store = Store(home)
     return store.register(
         RegistryRecord(
@@ -114,6 +119,9 @@ def _register_maximal(home: Path, project_id: str, path: Path) -> RegistryRecord
             model="grok-4.6",
             providers=["grok_cli", "claude_code"],
             registered_at=datetime(2026, 9, 21, tzinfo=UTC),
+            bootstrap=["just", "setup"],
+            bootstrap_timeout=600.0,
+            isolate=True,
         )
     )
 
@@ -169,8 +177,11 @@ def test_coverage_model_fields_match_fixture() -> None:
         ("dirt_line", DirtLine),
         ("new_row", NewRow),
         ("foreign_commit", ForeignCommit),
+        ("stale_receipt", StaleReceipt),
         ("suite", Suite),
         ("suite_verb", SuiteVerb),
+        ("worktree_run", WorktreeRun),
+        ("retained_worktree", RetainedWorktree),
     ],
 )
 def test_nested_model_fields_match_fixture(fixture_key: str, model: type[BaseModel]) -> None:
@@ -194,6 +205,7 @@ def test_nested_model_fields_match_fixture(fixture_key: str, model: type[BaseMod
         ("suite_verdict", SuiteVerdict),
         ("external_review", ExternalReview),
         ("triage_class", TriageClass),
+        ("landing_state", LandingState),
     ],
 )
 def test_enum_values_match_fixture(fixture_key: str, enum: type[StrEnum]) -> None:
@@ -211,6 +223,7 @@ def test_enum_values_block_covers_every_guarded_enum() -> None:
         "suite_verdict",
         "external_review",
         "triage_class",
+        "landing_state",
     }
 
 

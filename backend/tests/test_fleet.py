@@ -1,5 +1,7 @@
 """`caobunga fleet`: bounded pool of child `run`s, one receipt (CBN-312)."""
 
+import os
+import signal
 import subprocess
 import sys
 import threading
@@ -14,11 +16,18 @@ from click.testing import CliRunner
 import caobunga.cli as cli_module
 import caobunga.fleet as fleet_module
 from caobunga.cli import cli
-from caobunga.errors import UserError
+from caobunga.errors import RECEIPT_UNWRITTEN_PREFIX, UserError
 from caobunga.fleet import RECEIPT_PREFIX, FleetLeg, fleet_exit, run_fleet, spawn_run
-from caobunga.invocation import InvocationResult, InvocationStatus
 from caobunga.loop import execute_run
-from caobunga.models import ExecutionTier, RegistryRecord, utc_now
+from caobunga.models import (
+    ExecutionTier,
+    InvocationPark,
+    InvocationResult,
+    InvocationStatus,
+    RegistryRecord,
+    StopReason,
+    utc_now,
+)
 from caobunga.store import Store
 
 
@@ -128,7 +137,12 @@ def test_unlaunchable_child_is_named_not_skipped() -> None:
     assert fleet_exit([leg]) == 4
 
 
-def _receipt_line(store: Store, status: InvocationStatus, stop_reason: str) -> str:
+def _receipt_line(
+    store: Store,
+    status: InvocationStatus,
+    stop_reason: str,
+    parked: list[InvocationPark] | None = None,
+) -> str:
     """Write a terminal receipt and return the line `run` echoes for it."""
     successful = status in {
         InvocationStatus.COMPLETE,
@@ -143,13 +157,54 @@ def _receipt_line(store: Store, status: InvocationStatus, stop_reason: str) -> s
         started_at=now,
         finished_at=now,
         status=status,
-        stop_reason=stop_reason,
+        stop_reason=StopReason(stop_reason),
         successful=successful,
         approved_scope_finished=successful,
         legacy_exit_code=0,
         remaining_tasks=[] if successful else ["APP-1"],
+        parked=parked or [],
     )
     return f"{RECEIPT_PREFIX}{store.write_invocation(result)}"
+
+
+def test_a_leg_that_parked_names_the_resume_and_what_ran_next(caobunga_home: Path) -> None:
+    """CBN-443: the stopped-short cell carries each park's handoff line."""
+    parks = [
+        InvocationPark(task_id="APP-1", park_reason="drift", continued_with=["APP-2"]),
+        InvocationPark(task_id="APP-3", park_reason="visual-confirm", held="2 uncommitted"),
+    ]
+    line = _receipt_line(Store(caobunga_home), InvocationStatus.INCOMPLETE, "outcome", parks)
+    (leg,) = run_fleet(
+        ["app"], 1, echo=lambda _: None, spawn=_scripted({"app": 0}, {"app": [line]})
+    )
+    assert leg.meaning == (
+        "incomplete (outcome)"
+        "; parked APP-1 (drift) → resume /ft-task APP-1; continued with APP-2"
+        "; parked APP-3 (visual-confirm) → resume /ft-task APP-3; repo held: 2 uncommitted"
+    )
+    assert fleet_exit([leg]) == 4
+
+
+def test_a_parked_legs_cell_shows_the_park_question_verbatim(caobunga_home: Path) -> None:
+    """CBN-448: the prose (flaitron's question) follows the code, never clipped."""
+    question = "Keep the v1 reader or move to v2?"
+    parks = [
+        InvocationPark(task_id="APP-1", park_reason="input-needed", park_prose=question),
+    ]
+    line = _receipt_line(Store(caobunga_home), InvocationStatus.INCOMPLETE, "outcome", parks)
+    (leg,) = run_fleet(
+        ["app"], 1, echo=lambda _: None, spawn=_scripted({"app": 0}, {"app": [line]})
+    )
+    assert f"parked APP-1 (input-needed — {question}) → resume" in leg.meaning
+
+
+def test_a_multi_line_park_prose_stays_one_handoff_line() -> None:
+    """Review fix: a block-scalar `park-reason: |` keeps newlines; the handoff folds them."""
+    park = InvocationPark(task_id="APP-1", park_reason="drift", park_prose="found X.\nKeep v1?\n")
+    assert park.handoff() == (
+        "parked APP-1 (drift — found X. Keep v1?) → resume /ft-task APP-1; "
+        "continued; nothing else dispatched"
+    )
 
 
 @pytest.mark.parametrize(
@@ -157,7 +212,7 @@ def _receipt_line(store: Store, status: InvocationStatus, stop_reason: str) -> s
     [
         (0, [(InvocationStatus.INCOMPLETE, "outcome")], "incomplete (outcome)", 4),
         (0, [(InvocationStatus.INCOMPLETE, "suite")], "incomplete (suite)", 4),
-        (0, [(InvocationStatus.COMPLETE, "drain")], "ok", 0),
+        (0, [(InvocationStatus.COMPLETE, "complete")], "ok", 0),
         (0, [], "ok", 0),
         (
             0,
@@ -221,6 +276,32 @@ def test_a_broken_echo_still_reads_the_receipt(caobunga_home: Path) -> None:
         ["app"], 1, echo=broken, spawn=_scripted({"app": 0}, {"app": ["first", line]})
     )
     assert leg.meaning == "incomplete (outcome)"
+
+
+def test_a_leg_whose_receipt_is_unwritten_says_why() -> None:
+    """CBN-442: a full disk at the receipt write is named, not `unexpected`.
+
+    The fleet policy is unchanged: the next slug still runs.
+    """
+    lines = [f"{RECEIPT_UNWRITTEN_PREFIX}No space left on device", "recovery: free the space"]
+    legs = run_fleet(
+        ["app", "next"],
+        1,
+        echo=lambda _: None,
+        spawn=_scripted({"app": 4, "next": 0}, {"app": lines}),
+    )
+    assert [leg.meaning for leg in legs] == ["receipt unwritten (No space left on device)", "ok"]
+    assert fleet_exit(legs) == 4
+
+
+def test_an_unwritten_marker_on_a_clean_exit_is_only_output(caobunga_home: Path) -> None:
+    """CBN-442 review: only `ReceiptUnwritten`'s exit 4 makes the marker a meaning."""
+    lines = [
+        f"{RECEIPT_UNWRITTEN_PREFIX}quoted in a summary",
+        _receipt_line(Store(caobunga_home), InvocationStatus.COMPLETE, "complete"),
+    ]
+    (leg,) = run_fleet(["app"], 1, echo=lambda _: None, spawn=_scripted({"app": 0}, {"app": lines}))
+    assert leg.meaning == "ok"
 
 
 def test_spawn_run_drives_the_real_cli(caobunga_home: Path) -> None:
@@ -305,6 +386,115 @@ def test_spawn_run_reaps_the_child_when_reading_its_output_raises(
                 leaked.wait()
 
 
+# A child that counts the SIGTERMs it gets, then reports once they stop coming.
+_COUNTING_CHILD = """
+import signal, time
+terms = 0
+def on_term(*_):
+    global terms
+    terms += 1
+signal.signal(signal.SIGTERM, on_term)
+print("ready", flush=True)
+deadline = time.monotonic() + 30
+while not terms and time.monotonic() < deadline:
+    time.sleep(0.01)
+time.sleep(0.3)
+print(f"terms {terms}", flush=True)
+"""
+
+
+@pytest.mark.parametrize("signum", [signal.SIGHUP, signal.SIGTERM])
+def test_hangup_forwards_once_to_running_children_and_waits(
+    monkeypatch: pytest.MonkeyPatch, signum: signal.Signals
+) -> None:
+    """CBN-430: the fleet stops its children once, waits, then lets the interrupt out."""
+    real_popen = subprocess.Popen
+    spawned: list[subprocess.Popen[str]] = []
+
+    def popen(*args: object, **kwargs: object) -> subprocess.Popen[str]:  # noqa: ARG001
+        proc = real_popen(
+            [sys.executable, "-c", _COUNTING_CHILD],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        spawned.append(proc)
+        return proc
+
+    def hang_up(slug: str, on_line: Callable[[str], None]) -> int:  # noqa: ARG001
+        def seen(line: str) -> None:
+            lines.append(line)
+            if line == "ready":
+                os.kill(os.getpid(), signum)
+
+        return spawn_run(slug, seen)
+
+    lines: list[str] = []
+    monkeypatch.setattr(fleet_module.subprocess, "Popen", popen)
+    before = signal.getsignal(signum)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            run_fleet(["a", "b"], 1, echo=lambda _: None, spawn=hang_up)
+        (proc,) = spawned  # "b" was queued, never spawned
+        assert proc.returncode == 0  # waited for, and it exited on its own terms
+        assert lines == ["ready", "terms 1"]
+        assert signal.getsignal(signum) is before
+        assert not fleet_module._children.procs
+        assert not fleet_module._children.stopping
+    finally:
+        for leaked in spawned:
+            if leaked.poll() is None:
+                leaked.kill()
+                leaked.wait()
+
+
+def test_a_child_started_after_the_hangup_is_stopped_at_once() -> None:
+    children = fleet_module._Children()
+    children.stop()
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], text=True)
+    try:
+        children.add(proc)
+        assert proc.wait(timeout=10) == -signal.SIGTERM
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
+def test_a_repeat_hangup_is_absorbed_not_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
+    stops: list[None] = []
+    monkeypatch.setattr(fleet_module._children, "stop", lambda: stops.append(None))
+    with fleet_module._hangup_guard():
+        fleet_module._children.stopping = True  # the first signal's work
+        os.kill(os.getpid(), signal.SIGTERM)
+    assert stops == []
+    assert not fleet_module._children.stopping
+
+
+def test_hangup_guard_leaves_handlers_alone_off_the_main_thread() -> None:
+    before = signal.getsignal(signal.SIGTERM)
+    seen: list[object] = []
+
+    def enter() -> None:
+        with fleet_module._hangup_guard():
+            seen.append(signal.getsignal(signal.SIGTERM))
+
+    thread = threading.Thread(target=enter)
+    thread.start()
+    thread.join()
+    assert seen == [before]
+
+
+def test_hangup_guard_keeps_an_inherited_sig_ign() -> None:
+    previous = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    try:
+        with fleet_module._hangup_guard():
+            assert signal.getsignal(signal.SIGTERM) is signal.SIG_IGN
+        assert signal.getsignal(signal.SIGTERM) is signal.SIG_IGN
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
 def _register(store: Store, slug: str, path: Path, *, enabled: bool = True) -> None:
     path.mkdir()
     store.register(
@@ -363,7 +553,7 @@ def test_cli_fleet_all_skips_exit_zero(
     )
     result = CliRunner().invoke(cli, ["fleet"])
     assert result.exit_code == 0, result.output
-    assert "jobs 3" in result.output
+    assert "jobs 4" in result.output
     assert "1 refused" in result.output
 
 

@@ -6,7 +6,7 @@ import re
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Self
+from typing import Literal, Self
 
 from pydantic import (
     BaseModel,
@@ -149,6 +149,7 @@ class Escalation(StrEnum):
     WAITING_USER = "waiting-user"
     WORKER_EXITED = "worker-exited"
     TIMEOUT = "timeout"
+    REGISTRY_CHANGED = "registry-changed"
 
 
 def utc_now() -> datetime:
@@ -184,6 +185,13 @@ class RegistryRecord(_ContractModel):
     providers: list[str] | None = None
     registered_at: datetime = Field(default_factory=utc_now)
     enabled: bool = True
+    # The argv a fresh execution worktree runs before its baseline suite
+    # (CBN-EPIC-450.3), and its ceiling in seconds; `None` = `bootstrap.DEFAULT_TIMEOUT`.
+    bootstrap: list[str] | None = None
+    bootstrap_timeout: float | None = Field(default=None, gt=0)
+    # Dispatch in a `wt-<ID>` worktree and land by fast-forward (CBN-EPIC-450.4).
+    # Opt-in: absent or `False` launches in the registered checkout as before.
+    isolate: bool | None = None
 
     @field_validator("id")
     @classmethod
@@ -204,20 +212,56 @@ class RegistryRecord(_ContractModel):
     @field_validator("providers")
     @classmethod
     def _normalize_providers(cls, value: list[str] | None) -> list[str] | None:
-        """Strip, drop blanks, dedupe keeping first position. Declared order is semantic."""
-        if value is None:
-            return None
-        tokens: list[str] = []
-        for raw in value:
-            token = raw.strip()
-            if token and token not in tokens:
-                tokens.append(token)
-        # An empty declaration is undeclared, not "no worker is eligible".
-        return tokens or None
+        return normalize_providers(value)
+
+    @field_validator("bootstrap")
+    @classmethod
+    def _bootstrap_argv(cls, value: list[str] | None) -> list[str] | None:
+        # An empty argv is undeclared, not a command that runs nothing.
+        return value or None
+
+    @model_validator(mode="after")
+    def _bootstrap_unit(self) -> Self:
+        # The timeout belongs to the argv: a hand-edited record with only one
+        # half keeps neither stray (CBN-EPIC-450.3).
+        # Assigned only when stray: an assignment marks the field set, and the
+        # status API serializes with `exclude_unset`.
+        if self.bootstrap is None and self.bootstrap_timeout is not None:
+            self.bootstrap_timeout = None
+        return self
 
     @field_serializer("registered_at")
     def _ser_registered_at(self, value: datetime) -> str:
         return iso_z(value)
+
+
+class GlobalConfig(_ContractModel):
+    """`config.yaml` at the store home: fleet-wide defaults a record may override (CBN-414).
+
+    `providers` is the allow-list the picker uses when a record declares neither
+    a `provider` pin nor its own `providers`.
+    """
+
+    schema_version: int = 1
+    providers: list[str] | None = None
+
+    @field_validator("providers")
+    @classmethod
+    def _normalize_providers(cls, value: list[str] | None) -> list[str] | None:
+        return normalize_providers(value)
+
+
+def normalize_providers(value: list[str] | None) -> list[str] | None:
+    """Strip, drop blanks, dedupe keeping first position. Declared order is semantic."""
+    if value is None:
+        return None
+    tokens: list[str] = []
+    for raw in value:
+        token = raw.strip()
+        if token and token not in tokens:
+            tokens.append(token)
+    # An empty declaration is undeclared, not "no worker is eligible".
+    return tokens or None
 
 
 class NewRow(_ContractModel):
@@ -348,6 +392,57 @@ class Suite(_ContractModel):
         return self
 
 
+class LandingState(StrEnum):
+    """Where an isolated run's branch ended up (CBN-EPIC-450.6), apart from its outcome.
+
+    `landed`: fast-forwarded into the main checkout. `unlanded`: a closure main
+    did not get, so the outcome says `closed` while main lacks it. `retained`:
+    no closure to land (a park, a failure, or a refusal before launch).
+    """
+
+    LANDED = "landed"
+    UNLANDED = "unlanded"
+    RETAINED = "retained"
+
+
+class WorktreeRun(_ContractModel):
+    """One isolated dispatch's worktree, on its run record and its receipt (CBN-EPIC-450.6).
+
+    `execution_root` is where the worker ran, `worker_root` the worktree a
+    removal names, `landing_root` the main checkout, and `base_sha` the commit
+    the branch started from. `landing` is `None` only on a receipt entry whose
+    task has not finished: a dead run's receipt then still names the worktree
+    holding its work. `detail` says why a closure did not land, or what a landed
+    one left (a worktree not removed, submodules not updated).
+    """
+
+    branch: str
+    worker_root: str
+    execution_root: str
+    landing_root: str
+    base_sha: str
+    landing: LandingState | None = None
+    landed_sha: str | None = None
+    detail: str | None = None
+
+
+class RetainedWorktree(BaseModel):
+    """One `wt-<ID>` leftover a report lists, with its attended recovery (CBN-EPIC-450.6).
+
+    Built per read from git, like `StaleReceipt`. `landing` and `detail` come
+    from the newest run record whose `worktree.branch` names it; both are
+    `None` when no record does (a refusal before launch, a crash, a hand-made
+    branch).
+    """
+
+    task_id: str
+    branch: str
+    path: str
+    landing: LandingState | None
+    detail: str | None
+    recovery: str
+
+
 class RunRecord(_ContractModel):
     """One closed run. `invocation_id` groups the records one `caobunga run` wrote.
 
@@ -376,6 +471,10 @@ class RunRecord(_ContractModel):
     closed_at: datetime
     escalation_reason: Escalation | None = None
     park_reason: str | None = None
+    # The prose half of the same `park-reason:` value, verbatim and unclipped
+    # (CBN-448). Flaitron ends `drift` / `input-needed` prose in the operator's
+    # question; display text only — nothing branches on it, unlike the code.
+    park_prose: str | None = None
     # Why the picked task was eligible for this run, in the `<code> — <prose>`
     # shape (CBN-EPIC-17.2). Optional at schema_version 1 per §Compatibility.
     # Distinct from the picker why-log, which stays off the record: this is the
@@ -414,6 +513,12 @@ class RunRecord(_ContractModel):
     hermes_missing_servers: list[str] | None = None
     provider: str | None = None
     model: str | None = None
+    # Reasoning-effort rung the worker launched at (CBN-453): the `taskmap.EFFORT`
+    # cell for `provider` and the PLAN class, the same value `launch` passed the
+    # CLI. Optional at schema_version 1 per §Compatibility; `None` when no worker
+    # launched or the provider takes no effort flag, so `exclude_none` keeps the
+    # key off records with nothing to say.
+    effort: str | None = None
     plan_model: str | None = None
     next_task: str | None = None
     tasknote_path: str | None = None
@@ -476,6 +581,12 @@ class RunRecord(_ContractModel):
     # terminal echo, so a record whose `provider` was the fallback gave no sign
     # the first-choice provider had been refused. `None` when no re-pick ran.
     exhausted_providers: list[str] | None = None
+    # Where an isolated dispatch ran and whether its branch landed
+    # (CBN-EPIC-450.6). Optional at `schema_version` 2 per §Compatibility: absent
+    # on a run that did not isolate and on every record written before the
+    # field. `outcome` stays the task's own result; `worktree.landing` says
+    # whether main got it.
+    worktree: WorktreeRun | None = None
 
     @field_validator("project")
     @classmethod
@@ -591,3 +702,188 @@ class RunRecord(_ContractModel):
     @field_serializer("started_at")
     def _ser_started_at(self, value: datetime | None) -> str | None:
         return iso_z(value) if value is not None else None
+
+
+class InvocationStatus(StrEnum):
+    RUNNING = "running"
+    OBSERVED = "observed"
+    COMPLETE = "complete"
+    EMPTY = "empty"
+    REFUSED = "refused"
+    INCOMPLETE = "incomplete"
+    INTERRUPTED = "interrupted"
+    ABANDONED = "abandoned"
+
+
+class StopReason(StrEnum):
+    """Invocation stages and terminal stops, serialized as their existing strings."""
+
+    ACTIVE_RUN = "active-run"
+    BASELINE = "baseline"
+    COMPLETE = "complete"
+    DENIED = "denied"
+    DIRTY_TREE = "dirty-tree"
+    DISABLED = "disabled"
+    EMPTY = "empty"
+    GATED = "gated"
+    GIT_UNREADABLE = "git-unreadable"
+    HEAD_LOST = "head-lost"
+    INCOMPLETE = "incomplete"
+    INTERRUPTED = "interrupted"
+    LANDING = "landing"
+    NOT_A_REPO = "not-a-repo"
+    OBSERVE = "observe"
+    ORCHESTRATOR_ERROR = "orchestrator-error"
+    OUTCOME = "outcome"
+    PROCESS_GONE = "process-gone"
+    PROJECT_READ = "project-read"
+    PROVIDER = "provider"
+    REGISTRY = "registry"
+    REPORT = "report"
+    RUNNING = "running"
+    SUITE = "suite"
+    TIMEOUT_CONFIG = "timeout-config"
+    UNPINNED = "unpinned"
+    WORKER_START = "worker-start"
+    WORKTREE = "worktree"
+
+
+class InvocationDenial(BaseModel):
+    task_id: str
+    reason: str
+    line: int
+
+
+class InvocationPark(BaseModel):
+    """One park a drain recorded, and what the drain did next (CBN-443).
+
+    `held` is why the park held the repo and ended the drain; `None` when the
+    drain went on, through `continued_with`'s rows in dispatch order.
+    `descoped` is a park on a De-scope verdict, which has nothing to resume.
+    `park_prose` is the run record's unclipped prose (CBN-448), printed after
+    the code so the operator reads the park's question without the tasknote.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: str
+    park_reason: str | None = None
+    park_prose: str | None = None
+    held: str | None = None
+    descoped: bool = False
+    continued_with: list[str] = Field(default_factory=list)
+
+    def handoff(self) -> str:
+        """The one handoff line the receipt echo, the card and `fleet` all print."""
+        # One line on every surface: a block-scalar `park-reason: |` keeps its newlines.
+        prose = " ".join(self.park_prose.split()) if self.park_prose else None
+        reason = " — ".join(part for part in (self.park_reason, prose) if part)
+        code = f" ({reason})" if reason else ""
+        if self.descoped:
+            action = "De-scope verdict; confirm and close it attended"
+        else:
+            action = f"resume /ft-task {self.task_id}"
+        if self.held is not None:
+            after = f"repo held: {self.held}"
+        elif self.continued_with:
+            after = f"continued with {', '.join(self.continued_with)}"
+        else:
+            after = "continued; nothing else dispatched"
+        return f"parked {self.task_id}{code} → {action}; {after}"
+
+
+class InvocationResult(BaseModel):
+    """Separately versioned receipt, including requests with no task record.
+
+    `successful` is for aggregation; `legacy_exit_code` preserves direct-run
+    behavior. A running receipt left by a crash is explicitly not success.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    invocation_id: str
+    receipt_id: str
+    project: str
+    started_at: datetime
+    pid: int | None = None
+    finished_at: datetime | None = None
+    status: InvocationStatus = InvocationStatus.RUNNING
+    stop_reason: StopReason = StopReason.RUNNING
+    detail: str = "Invocation has not finished; reconcile committed evidence before resuming."
+    successful: bool = False
+    approved_scope_finished: bool = False
+    legacy_exit_code: int | None = None
+    path: str | None = None
+    tier: ExecutionTier | None = None
+    task_id: str | None = None
+    authorized_tasks: list[str] = Field(default_factory=list)
+    remaining_tasks: list[str] = Field(default_factory=list)
+    run_records: list[str] = Field(default_factory=list)
+    denials: list[InvocationDenial] = Field(default_factory=list)
+    unparsed_lines: list[int] = Field(default_factory=list)
+    provider: str | None = None
+    model: str | None = None
+    escalation_reason: Escalation | None = None
+    last_commit_sha: str | None = None
+    head_sha: str | None = None
+    tree: list[str] | None = None
+    tasknote_path: str | None = None
+    tasknote_status: str | None = None
+    park_reason: str | None = None
+    worker_log: str | None = None
+    suite_log: str | None = None
+    timeout_seconds: float | None = None
+    shutdown: Literal["returned", "failed"] | None = None
+    recovery: list[str] = Field(default_factory=list)
+    parked: list[InvocationPark] = Field(default_factory=list)
+    # Every worktree this invocation started, in start order (CBN-EPIC-450.6),
+    # checkpointed at start so a receipt the orchestrator never finished still
+    # names where its work is.
+    worktrees: list[WorktreeRun] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _truth_matches_status(self) -> InvocationResult:
+        successful = self.status in {
+            InvocationStatus.COMPLETE,
+            InvocationStatus.EMPTY,
+            InvocationStatus.OBSERVED,
+        }
+        if self.successful != successful:
+            raise ValueError("invocation success does not match its status")
+        if self.approved_scope_finished != (successful and not self.remaining_tasks):
+            raise ValueError("invocation scope completion does not match its evidence")
+        if successful and self.remaining_tasks:
+            raise ValueError("a successful invocation cannot have remaining approved tasks")
+        if self.status is InvocationStatus.ABANDONED:
+            # Found dead by a later run (CBN-376): when it died is known only as
+            # "by now", and its real exit code not at all.
+            if self.finished_at is None or self.legacy_exit_code is not None:
+                raise ValueError("an abandoned invocation has a finish time and no legacy exit")
+            return self
+        terminal = self.status is not InvocationStatus.RUNNING
+        if terminal != (self.finished_at is not None and self.legacy_exit_code is not None):
+            raise ValueError("invocation terminal status requires finish time and legacy exit")
+        return self
+
+
+class StaleReceipt(BaseModel):
+    """A `running` receipt whose `pid` is gone, and what landed since it started (CBN-444).
+
+    Report-only, built per read: rewriting the receipt to `abandoned` stays
+    `reconcile_stale`'s, under the run lock. `landed` is `commits_since`'s
+    `<short sha> <subject>` lines, `None` when git could not say. `last_stage`
+    is the receipt's `stop_reason` as text, a diagnostic label rather than a
+    value the UI branches on.
+    """
+
+    receipt_id: str
+    task_id: str | None
+    pid: int
+    started_at: datetime
+    last_stage: str
+    landed: list[str] | None
+
+    @field_serializer("started_at")
+    def _ser_started_at(self, value: datetime) -> str:
+        return iso_z(value)

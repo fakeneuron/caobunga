@@ -1,5 +1,5 @@
 {
-  "$comment": "Checked-in key vocabulary for the /api/projects/{id} payload (CBN-EPIC-231.3). backend/tests/test_api_payload_keys.py derives each list from the live endpoint / pydantic models and asserts it matches this file; frontend/tests/unit/api-payload-keys.test.ts derives each list from frontend/src/api/types.ts and asserts the same. A key added on one side and not the other fails whichever suite reads this file. Order is not significant \u2014 both sides compare as sets. The last seven entries are the element shapes nested inside the first six (CBN-234): coverage_detail.denials[] / unparsed_rows[], tree_detail.blocking_lines[], run_record.new_rows[] / foreign_commits[] / suite / suite.verbs[]; the backend checks those by model_fields only, since several of the arrays are conditionally present and no single live payload carries every element. The enum_values block (CBN-263) is the value vocabulary of every StrEnum the payload serializes: backend/tests/test_api_payload_keys.py compares it to each enum's member values, the frontend test to each types.ts string-literal union, both as sets.",
+  "$comment": "Checked-in key vocabulary for the /api/projects/{id} payload (CBN-EPIC-231.3). backend/tests/test_api_payload_keys.py derives each list from the live endpoint / pydantic models and asserts it matches this file; frontend/tests/unit/api-payload-keys.test.ts derives each list from frontend/src/api/types.ts and asserts the same. A key added on one side and not the other fails whichever suite reads this file. Order is not significant \u2014 both sides compare as sets. The last ten entries are the element shapes nested inside the first six (CBN-234): coverage_detail.denials[] / unparsed_rows[], tree_detail.blocking_lines[], run_record.new_rows[] / foreign_commits[] / suite / suite.verbs[] / worktree (CBN-EPIC-450.6), project_detail.stale_receipts[] (CBN-444) and project_detail.retained_worktrees[] (CBN-EPIC-450.6); the backend checks those by model_fields only, since several of the arrays are conditionally present and no single live payload carries every element. The enum_values block (CBN-263) is the value vocabulary of every StrEnum the payload serializes: backend/tests/test_api_payload_keys.py compares it to each enum's member values, the frontend test to each types.ts string-literal union, both as sets.",
   "project_detail": [
     "schema_version",
     "id",
@@ -10,13 +10,18 @@
     "providers",
     "registered_at",
     "enabled",
+    "bootstrap",
+    "bootstrap_timeout",
+    "isolate",
     "current",
     "coverage",
     "tree",
     "last_run",
     "runs",
     "run_counts",
-    "reports"
+    "reports",
+    "stale_receipts",
+    "retained_worktrees"
   ],
   "coverage_detail": [
     "open",
@@ -57,6 +62,7 @@
     "closed_at",
     "escalation_reason",
     "park_reason",
+    "park_prose",
     "eligibility_reason",
     "hermes_review",
     "hermes_verdict",
@@ -64,6 +70,7 @@
     "hermes_missing_servers",
     "provider",
     "model",
+    "effort",
     "plan_model",
     "next_task",
     "tasknote_path",
@@ -75,7 +82,8 @@
     "foreign_commits",
     "suite",
     "external_review",
-    "exhausted_providers"
+    "exhausted_providers",
+    "worktree"
   ],
   "denial": [
     "task_id",
@@ -100,6 +108,14 @@
     "task_id",
     "unattended"
   ],
+  "stale_receipt": [
+    "receipt_id",
+    "task_id",
+    "pid",
+    "started_at",
+    "last_stage",
+    "landed"
+  ],
   "foreign_commit": [
     "sha",
     "author",
@@ -117,6 +133,24 @@
     "refused",
     "tree_changed",
     "detail"
+  ],
+  "worktree_run": [
+    "branch",
+    "worker_root",
+    "execution_root",
+    "landing_root",
+    "base_sha",
+    "landing",
+    "landed_sha",
+    "detail"
+  ],
+  "retained_worktree": [
+    "task_id",
+    "branch",
+    "path",
+    "landing",
+    "detail",
+    "recovery"
   ],
   "enum_values": {
     "execution_tier": [
@@ -138,7 +172,8 @@
       "worker-error",
       "waiting-user",
       "worker-exited",
-      "timeout"
+      "timeout",
+      "registry-changed"
     ],
     "hermes_review": [
       "reviewed",
@@ -164,6 +199,11 @@
     "triage_class": [
       "obvious",
       "needs-judgment"
+    ],
+    "landing_state": [
+      "landed",
+      "unlanded",
+      "retained"
     ]
   }
 }

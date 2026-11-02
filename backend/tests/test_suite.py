@@ -313,6 +313,22 @@ def test_a_refused_verb_never_takes_the_suite_lock(
     assert waits == []
 
 
+def test_on_verb_names_each_verb_before_it_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`on_verb` names the fleet verb just before its spawn (CBN-EPIC-449.5)."""
+    store, repo = _registered_repo(tmp_path)
+    _has_just(monkeypatch)
+    seen: list[str] = []
+
+    def run(argv: Sequence[str], cwd: Path, timeout: float) -> tuple[int, str]:  # noqa: ARG001
+        seen.append(f"ran {argv[-1]}")
+        return 0, "ok\n"
+
+    run_suite(repo, store, run=run, on_verb=seen.append)
+    assert seen == ["test", "ran test", "lint", "ran lint", "typecheck", "ran typecheck"]
+
+
 def test_a_queued_verb_says_it_waits_then_runs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -6,7 +6,7 @@ reads — `store.last_run` and the `probe_fitness` subprocess), the per-pick
 `eligibility:` and `unparsed:` echoes (`echo_eligibility`, `echo_unparsed`), the
 exit-3 message (`no_task_message`), the denial list both share (`denial_codes`),
 and the stop details (`unpinned_exit_detail`, `outcome_exit_detail`,
-`suite_exit_detail`, `run_tally`). None of them decides anything: the stop
+`suite_exit_detail` and its `non_green_verbs`, `run_tally`). None of them decides anything: the stop
 classifiers and every `drain:` reason literal stay in `loop.py`, where
 `test_contract`'s drain guard source-reads them. A leaf module: the flaitron
 façade, `models`, `store`, and `suite_verbs` cross in, and nothing calls back
@@ -15,7 +15,7 @@ into `loop.py`. Split out of `loop.py` at CBN-EPIC-363.5.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from pathlib import Path
 
 from caobunga.flaitron import (
@@ -29,7 +29,7 @@ from caobunga.flaitron import (
     open_task_ids,
     split_park_reason,
 )
-from caobunga.models import RegistryRecord, RunRecord, SuiteVerb
+from caobunga.models import RegistryRecord, RunRecord, Suite, SuiteVerb
 from caobunga.store import Store
 from caobunga.suite_verbs import probe_fitness
 
@@ -39,7 +39,10 @@ def echo_observe(
     project: ProjectRead,
     store: Store,
     echo: Callable[[str], None] | None,
+    retained: Collection[str] = (),
 ) -> None:
+    """`retained` is the drain's `wt-<ID>` denial set (CBN-EPIC-450.6), already in
+    `project`'s pick, so the per-task echo agrees with the `next:` line."""
     if echo is None:
         return
     last = store.last_run(record.id)
@@ -67,6 +70,7 @@ def echo_observe(
             completed_ids=done,
             note=notes.get(task.task_id),
             open_ids=still_open,
+            retained=retained,
         )
         verdict = "allow" if allow else "deny"
         echo(f"eligibility: {task.task_id} {verdict}: {reason}")
@@ -160,8 +164,15 @@ def run_tally(runs: Sequence[RunRecord]) -> str:
 def suite_exit_detail(last: RunRecord) -> str:
     """`<id> suite <verdict> — <verb> exit <n>[, …]`: every verb that was not green."""
     assert last.suite is not None  # noqa: S101 — `suite_stops` gated this call
-    failed = ", ".join(_verb_word(verb) for verb in last.suite.verbs if not _verb_green(verb))
-    return f"{last.task_id} suite {last.suite.verdict.value} — {failed}"
+    return f"{last.task_id} suite {last.suite.verdict.value} — {non_green_verbs(last.suite)}"
+
+
+def non_green_verbs(suite: Suite) -> str:
+    """`test exit 1, lint timeout`: every verb that was not green, comma-separated.
+
+    Shared by the `suite` drain detail and the pre-launch baseline refusal (CBN-420).
+    """
+    return ", ".join(_verb_word(verb) for verb in suite.verbs if not _verb_green(verb))
 
 
 def _verb_green(verb: SuiteVerb) -> bool:

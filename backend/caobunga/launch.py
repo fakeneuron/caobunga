@@ -14,18 +14,22 @@ façade, `git`, `invocation`, `models`, `picker`, `prompt`, `store`, `suite`,
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+import time
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from caobunga import usage as usage_mod
-from caobunga.close import CloseSnapshot
+from caobunga.close import CloseSnapshot, diff_new_rows
 from caobunga.errors import GitUnreadable, Unlaunchable, UserError, WorkerError
 from caobunga.flaitron import (
+    PARK_UNCOMMITTED,
     NextTask,
     list_open_tasknotes,
+    park_commits,
     pinned_skill_rel,
     supports_unattended,
+    try_read_project,
     unattended_module_rel,
 )
 from caobunga.git import git_dirt, git_head, tree_after
@@ -37,8 +41,9 @@ from caobunga.models import (
     Outcome,
     RegistryRecord,
     RunRecord,
+    StopReason,
 )
-from caobunga.picker import ProviderUnavailable, pick
+from caobunga.picker import Pick, ProviderUnavailable, pick
 from caobunga.prompt import worker_message
 from caobunga.store import Store
 from caobunga.suite import SuiteRun
@@ -126,7 +131,20 @@ def _park_mismatch(root: Path, task_id: str) -> str | None:
     return None
 
 
-def _failed_from_worker(exc: WorkerError, root: Path, task_id: str) -> CloseSnapshot:
+def _failed_from_worker(
+    exc: WorkerError,
+    root: Path,
+    task_id: str,
+    baseline: Collection[str] | None,
+) -> CloseSnapshot:
+    """The failure snapshot, including the new-row diff a close and a park carry (CBN-436).
+
+    A worker that filed a PLAN row and then died still filed it. The diff is the
+    working-tree read against the launch baseline, the same one `inspect_close`
+    uses, so an uncommitted row counts. An unreadable PLAN leaves `new_rows`
+    unset: this is already the failure record, and losing it over the diff is
+    the worse trade.
+    """
     reason = exc.escalation or Escalation.WORKER_ERROR
     summary = str(exc)
     # The mismatch goes ahead of the tree line: it is short and the summary is
@@ -135,7 +153,9 @@ def _failed_from_worker(exc: WorkerError, root: Path, task_id: str) -> CloseSnap
         summary = f"{summary} — {mismatch}"
     if reason in (Escalation.WORKER_EXITED, Escalation.TIMEOUT):
         summary = f"{summary} — {tree_after(root, task_id)}"
-    return CloseSnapshot(outcome=Outcome.FAILED, summary=summary, escalation=reason)
+    project = try_read_project(root)
+    rows = diff_new_rows(project.tasks, baseline) if project is not None else None
+    return CloseSnapshot(outcome=Outcome.FAILED, summary=summary, escalation=reason, new_rows=rows)
 
 
 @dataclass(frozen=True)
@@ -143,20 +163,23 @@ class RunDeps:
     """`execute_run`'s injected collaborators and knobs, fixed for one invocation.
 
     Bundled so `_run_gated` / `launch_until_close` take one argument instead of
-    re-forwarding each kwarg (CBN-266). `timeout` is the resolved value, never
-    None. `store` stays positional: the call chain is keyed on it, not tuned by it.
+    re-forwarding each kwarg (CBN-266), and built once by each public adapter
+    (CBN-400). `timeout` is as passed until `_execute_run` resolves it after the
+    `timeout-config` stamp, so a bad `run_timeout()` keeps its stop reason; past
+    that point it is never None. `store` and the mutable `InvocationTrace` stay
+    separate arguments: the call chain is keyed on them, not tuned by them.
     """
 
     worker: Worker | None
     poll_interval: float
-    timeout: float
+    timeout: float | None
     sleep: Callable[[float], None]
     usage: Sequence[ProviderUsage] | None
     echo: Callable[[str], None] | None
     publish_status: Callable[[Store, RunRecord], Path] | None
+    on_run: Callable[[RunRecord], None] | None
     run_suite: Callable[[Path, Store], SuiteRun] | None
     grace: float
-    trace: InvocationTrace
 
 
 @dataclass(frozen=True)
@@ -166,6 +189,9 @@ class Posture:
     unattended: bool
     unattended_pick: bool
     drain_pick: bool
+    # The pick's `wt-<ID>` denials (CBN-EPIC-450.6), so the record's `next_task`
+    # agrees with the drain.
+    retained: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -181,12 +207,16 @@ class Attempt:
     provider: str | None = None
     model: str | None = None
     exhausted: set[str] = field(default_factory=set)
+    # Monotonic start of the current launch's close wait, so the post-close
+    # `progress:` heartbeat continues its timeline (CBN-EPIC-449.5).
+    started: float | None = None
 
 
 def launch_posture(
     record: RegistryRecord,
     root: Path,
     echo: Callable[[str], None] | None,
+    retained: frozenset[str] = frozenset(),
 ) -> Posture:
     # Probe the target's pinned `/ft-task` before launching: a pin that does not
     # recognize `--unattended` turns the posture flag into the operator-less
@@ -195,6 +225,10 @@ def launch_posture(
     unattended = supports_unattended(root)
     if not unattended and echo is not None:
         echo(f"{record.id}: flaitron pin does not recognize --unattended; sending --fast")
+    # A capable pin whose park recipe predates its commit step (CBN-459). A
+    # degraded pin is already flagged by the line above, so it gets no second.
+    if unattended and echo is not None and not park_commits(root):
+        echo(PARK_UNCOMMITTED.format(id=record.id))
     # Distinct from `unattended` above, deliberately (CBN-117). That one is the
     # *target's* capability and governs only which flag the worker message
     # carries; this one is *our* dispatch policy — the same expression the loop
@@ -207,6 +241,7 @@ def launch_posture(
         unattended=unattended,
         unattended_pick=record.tier in LAUNCHING_TIERS,
         drain_pick=record.tier in DRAIN_TIERS,
+        retained=retained,
     )
 
 
@@ -222,15 +257,18 @@ def launch_until_close(
     log_path: Path,
     baseline: list[str],
     deps: RunDeps,
+    trace: InvocationTrace,
 ) -> CloseSnapshot:
     """Pick → launch → wait, re-picking past a usage-limit refusal (CBN-213).
 
     Session shutdown on exit is the caller's; this only retires a session it
     is about to replace.
     """
+    timeout = deps.timeout
+    assert timeout is not None  # noqa: S101 — `_execute_run` resolved it; fail before any launch
     last_fail: WorkerError | None = None
     while True:
-        deps.trace.result.stop_reason = "provider"
+        trace.result.stop_reason = StopReason.PROVIDER
         try:
             chosen = pick(
                 candidate.plan_model,
@@ -241,7 +279,7 @@ def launch_until_close(
             )
         except ValueError as exc:
             if last_fail is not None:
-                return _failed_from_worker(last_fail, root, candidate.task_id)
+                return _failed_from_worker(last_fail, root, candidate.task_id, baseline)
             # No provider can run here is the machine's state, not this repo's:
             # exit 5, so `fleet` does not skip it as a 2 (CBN-EPIC-313.5).
             if isinstance(exc, ProviderUnavailable):
@@ -250,10 +288,10 @@ def launch_until_close(
         ran = (attempt.provider, attempt.model)
         attempt.provider = chosen.provider
         attempt.model = chosen.model
-        deps.trace.result.provider = chosen.provider
-        deps.trace.result.model = chosen.model
-        deps.trace.result.stop_reason = "worker-start"
-        deps.trace.checkpoint()
+        trace.result.provider = chosen.provider
+        trace.result.model = chosen.model
+        trace.result.stop_reason = StopReason.WORKER_START
+        trace.checkpoint()
         try:
             try:
                 attempt.session = client.launch(
@@ -286,33 +324,53 @@ def launch_until_close(
                     attempt,
                     root=root,
                     task_id=candidate.task_id,
+                    baseline=baseline,
                     deps=deps,
+                    trace=trace,
                 )
+            _echo_launch(deps.echo, candidate.task_id, chosen, record)
+            attempt.started = time.monotonic()
             return wait_for_close(
                 client,
                 attempt.session,
                 root,
                 candidate.task_id,
                 start_sha,
-                timeout=deps.timeout,
+                timeout=timeout,
                 poll_interval=deps.poll_interval,
                 sleep=deps.sleep,
                 unattended=posture.unattended_pick,
                 drain=posture.drain_pick,
                 baseline=baseline,
                 echo=deps.echo,
+                retained=posture.retained,
+                started=attempt.started,
             )
         except WorkerError as exc:
             # An unforeseen WorkerError still fails the run exactly as before;
             # it just falls back to the generic reason rather than inventing one.
             reason = exc.escalation or Escalation.WORKER_ERROR
             if not _should_repick(record, reason, client, attempt.session, root, start_sha):
-                return _failed_from_worker(exc, root, candidate.task_id)
+                return _failed_from_worker(exc, root, candidate.task_id, baseline)
             attempt.exhausted.add(chosen.provider)
             last_fail = exc
             if deps.echo is not None:
                 deps.echo(f"usage-limit: {chosen.provider} exhausted this invocation; re-picking")
-            retire_session(client, attempt, deps.trace)
+            retire_session(client, attempt, trace)
+
+
+def _echo_launch(
+    echo: Callable[[str], None] | None, task_id: str, chosen: Pick, record: RegistryRecord
+) -> None:
+    """`launch: <id> · provider <p> · model <m> · tier <t>` once the worker starts (CBN-EPIC-449.2).
+
+    Per launch, so a CBN-213 re-pick names the provider it switched to. Echo-only.
+    """
+    if echo is not None:
+        echo(
+            f"launch: {task_id} · provider {chosen.provider}"
+            f" · model {chosen.model} · tier {record.tier.value}"
+        )
 
 
 def _fail_unlaunched_repick(
@@ -324,7 +382,9 @@ def _fail_unlaunched_repick(
     *,
     root: Path,
     task_id: str,
+    baseline: Collection[str] | None,
     deps: RunDeps,
+    trace: InvocationTrace,
 ) -> CloseSnapshot:
     """A re-pick that cannot launch (binary gone since `which`, no recipe) does
     not erase the worker that already ran: like an exhausted pick, the last
@@ -336,13 +396,13 @@ def _fail_unlaunched_repick(
     if last_fail is None:
         raise exc
     unlaunched = attempt.provider
-    retire_session(client, attempt, deps.trace)
+    retire_session(client, attempt, trace)
     attempt.provider, attempt.model = ran
-    deps.trace.result.provider, deps.trace.result.model = ran
-    deps.trace.checkpoint()
+    trace.result.provider, trace.result.model = ran
+    trace.checkpoint()
     if deps.echo is not None:
         deps.echo(f"usage-limit: re-pick {unlaunched} cannot launch: {exc}")
-    return _failed_from_worker(last_fail, root, task_id)
+    return _failed_from_worker(last_fail, root, task_id, baseline)
 
 
 def shutdown_session(client: Worker, session: Session, trace: InvocationTrace) -> None:

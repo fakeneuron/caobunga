@@ -35,7 +35,7 @@ def outcome_counts(runs: Iterable[RunRecord]) -> dict[str, int]:
 
 
 def escalation_counts(runs: Iterable[RunRecord]) -> dict[str, int]:
-    """Tally by escalation reason, seeded with all seven values.
+    """Tally by escalation reason, seeded with all eight values.
 
     `sum()` may fall short of `failed + blocked`: records written before
     CBN-EPIC-12.2 stopped without a reason, and the model deliberately still

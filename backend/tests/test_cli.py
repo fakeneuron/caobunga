@@ -1,27 +1,43 @@
 """CLI: register / projects / status against an isolated CAOBUNGA_HOME."""
 
+import errno
+import os
 import shlex
 import subprocess
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
-from test_loop import _git
+from conftest import _commit, _git, _pin_supports_unattended
 from test_store import green_suite
 
 import caobunga as caobunga_pkg
 import caobunga.cli as cli_module
+import caobunga.invocation as invocation_module
 import caobunga.status_render as status_render
 from caobunga.cli import cli
-from caobunga.errors import ReportError
-from caobunga.flaitron import Coverage, Denial, TriageClass, parse_plan, seeded_line
+from caobunga.errors import ReceiptUnwritten, ReportError
+from caobunga.flaitron import (
+    PARK_UNCOMMITTED,
+    Coverage,
+    Denial,
+    TriageClass,
+    parse_plan,
+    seeded_line,
+)
+from caobunga.invocation import InvocationTrace, running_verdicts, stale_receipts
 from caobunga.local import LocalWorker
 from caobunga.models import (
     CLOSURE_OUTCOMES,
+    ExecutionTier,
     ExternalReview,
     HermesVerdictCode,
+    InvocationResult,
+    InvocationStatus,
     NewRow,
     Outcome,
+    RegistryRecord,
     RunRecord,
     utc_now,
 )
@@ -160,6 +176,31 @@ def test_register_reports_suite_fitness_without_refusing(
     result = _runner().invoke(cli, ["register", str(repo)])
     assert result.exit_code == 0, result.output
     assert f"suite-fitness: refused — no justfile at {repo.resolve()}" in result.output
+
+
+def test_register_warns_when_park_does_not_commit(
+    tmp_path: Path,
+    caobunga_home: Path,  # noqa: ARG001
+) -> None:
+    """Warn, never refuse (CBN-459): a pin with no committing park still registers."""
+    repo = tmp_path / "webapp"
+    repo.mkdir()
+    result = _runner().invoke(cli, ["register", str(repo)])
+    assert result.exit_code == 0, result.output
+    assert PARK_UNCOMMITTED.format(id="webapp") in result.output
+
+
+def test_register_quiet_when_park_commits(
+    tmp_path: Path,
+    caobunga_home: Path,  # noqa: ARG001
+) -> None:
+    """Through the real probe: the conftest pin carries the `Lone-park commit` step."""
+    repo = tmp_path / "webapp"
+    repo.mkdir()
+    _pin_supports_unattended(repo)
+    result = _runner().invoke(cli, ["register", str(repo)])
+    assert result.exit_code == 0, result.output
+    assert "does not commit" not in result.output
 
 
 def test_register_reports_suite_fitness_when_fit(
@@ -327,6 +368,127 @@ def test_register_providers_blank_value_is_undeclared(tmp_path: Path, caobunga_h
     result = _runner().invoke(cli, ["register", str(repo), "--providers", " , "])
     assert result.exit_code == 0, result.output
     assert Store(caobunga_home).get("app").providers is None
+
+
+def test_reregister_without_tier_keeps_stored_tier(tmp_path: Path, caobunga_home: Path) -> None:
+    """CBN-414: only --tier changes the tier; a fresh record still defaults to gated."""
+    repo = tmp_path / "app"
+    repo.mkdir()
+    runner = _runner()
+    assert runner.invoke(cli, ["register", str(repo)]).exit_code == 0
+    assert Store(caobunga_home).get("app").tier.value == "gated"
+    assert runner.invoke(cli, ["register", str(repo), "--tier", "proceed-on-green"]).exit_code == 0
+    again = runner.invoke(cli, ["register", str(repo), "--providers", "codex"])
+    assert again.exit_code == 0, again.output
+    assert "(proceed-on-green)" in again.output
+    assert Store(caobunga_home).get("app").tier.value == "proceed-on-green"
+
+
+def test_register_clear_providers(tmp_path: Path, caobunga_home: Path) -> None:
+    repo = tmp_path / "app"
+    repo.mkdir()
+    runner = _runner()
+    assert runner.invoke(cli, ["register", str(repo), "--providers", "codex"]).exit_code == 0
+    cleared = runner.invoke(cli, ["register", str(repo), "--clear-providers"])
+    assert cleared.exit_code == 0, cleared.output
+    assert Store(caobunga_home).get("app").providers is None
+    for value in ("codex", " , "):
+        args = ["register", str(repo), "--providers", value, "--clear-providers"]
+        both = runner.invoke(cli, args)
+        assert both.exit_code == 2
+        assert "mutually exclusive" in both.output
+
+
+def test_register_bootstrap_flags(tmp_path: Path, caobunga_home: Path) -> None:
+    """CBN-EPIC-450.3: shlex-split argv, timeout requires it, clear drops both."""
+    repo = tmp_path / "app"
+    repo.mkdir()
+    runner = _runner()
+    flags = ["--bootstrap", "just 'set up' $HOME", "--bootstrap-timeout", "90"]
+    assert runner.invoke(cli, ["register", str(repo), *flags]).exit_code == 0
+    record = Store(caobunga_home).get("app")
+    assert record.bootstrap == ["just", "set up", "$HOME"]
+    assert record.bootstrap_timeout == 90.0
+    kept = runner.invoke(cli, ["register", str(repo), "--tier", "proceed-on-green"])
+    assert kept.exit_code == 0, kept.output
+    assert Store(caobunga_home).get("app").bootstrap == ["just", "set up", "$HOME"]
+    cleared = runner.invoke(cli, ["register", str(repo), "--clear-bootstrap"])
+    assert cleared.exit_code == 0, cleared.output
+    assert Store(caobunga_home).get("app").bootstrap is None
+    assert Store(caobunga_home).get("app").bootstrap_timeout is None
+
+
+def test_register_isolate_flags(tmp_path: Path, caobunga_home: Path) -> None:
+    """CBN-EPIC-450.4: `--isolate` / `--no-isolate`; omitting both keeps the stored value."""
+    repo = tmp_path / "app"
+    repo.mkdir()
+    runner = _runner()
+    assert runner.invoke(cli, ["register", str(repo)]).exit_code == 0
+    assert Store(caobunga_home).get("app").isolate is None
+    assert runner.invoke(cli, ["register", str(repo), "--isolate"]).exit_code == 0
+    assert Store(caobunga_home).get("app").isolate is True
+    kept = runner.invoke(cli, ["register", str(repo), "--tier", "proceed-on-green"])
+    assert kept.exit_code == 0, kept.output
+    assert Store(caobunga_home).get("app").isolate is True
+    assert runner.invoke(cli, ["register", str(repo), "--no-isolate"]).exit_code == 0
+    assert Store(caobunga_home).get("app").isolate is False
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        (["--bootstrap-timeout", "5"], "--bootstrap-timeout requires --bootstrap"),
+        (["--bootstrap", "x", "--clear-bootstrap"], "--clear-bootstrap conflicts"),
+        (["--bootstrap-timeout", "5", "--clear-bootstrap"], "--clear-bootstrap conflicts"),
+        (["--bootstrap", "  "], "empty --bootstrap"),
+        (["--bootstrap", "just 'unclosed"], "cannot parse --bootstrap"),
+        (["--bootstrap", "x", "--bootstrap-timeout", "0"], "Invalid value"),
+        (["--bootstrap", "x", "--bootstrap-timeout", "nan"], "must be a finite number"),
+        (["--bootstrap", "x", "--bootstrap-timeout", "inf"], "must be a finite number"),
+    ],
+)
+def test_register_bootstrap_usage_errors(
+    tmp_path: Path,
+    caobunga_home: Path,
+    extra: list[str],
+    message: str,
+) -> None:
+    repo = tmp_path / "app"
+    repo.mkdir()
+    result = _runner().invoke(cli, ["register", str(repo), *extra])
+    assert result.exit_code == 2
+    assert message in result.output
+    assert not Store(caobunga_home).project_file("app").exists()
+
+
+def test_providers_verb_show_set_clear(caobunga_home: Path) -> None:
+    runner = _runner()
+    shown = runner.invoke(cli, ["providers"])
+    assert shown.exit_code == 0, shown.output
+    assert shown.output.strip() == "providers: none"
+    set_ = runner.invoke(cli, ["providers", "codex, claude_code,codex"])
+    assert set_.exit_code == 0, set_.output
+    assert set_.output.strip() == "providers: codex, claude_code"
+    assert Store(caobunga_home).load_config().providers == ["codex", "claude_code"]
+    assert runner.invoke(cli, ["providers"]).output.strip() == "providers: codex, claude_code"
+    cleared = runner.invoke(cli, ["providers", "--clear"])
+    assert cleared.exit_code == 0, cleared.output
+    assert Store(caobunga_home).load_config().providers is None
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (["providers", "nope"], "unknown provider 'nope'"),
+        (["providers", " , "], "empty provider list"),
+        (["providers", "codex", "--clear"], "not both"),
+    ],
+)
+def test_providers_verb_usage_errors(caobunga_home: Path, args: list[str], message: str) -> None:
+    result = _runner().invoke(cli, args)
+    assert result.exit_code == 2
+    assert message in result.output
+    assert Store(caobunga_home).load_config().providers is None
 
 
 def test_same_path_new_id_allowed(tmp_path: Path, caobunga_home: Path) -> None:
@@ -1206,8 +1368,8 @@ def test_status_names_the_coupling_between_the_seeded_row_and_foreign_dirt(
     fleet = runner.invoke(cli, ["status"])
     assert fleet.exit_code == 0
     assert "dirty (1)" in fleet.output
-    # A tasknote is itself a filing path, so this tree states both facts (CBN-138.4).
-    assert "every blocking line is a flaitron filing artifact" in one.output
+    # No run owns CBN-002, so its note is not a filing (CBN-434): the F1 shape.
+    assert "filing artifact" not in one.output
 
 
 def test_status_distinguishes_an_unreadable_tree_from_a_clean_one(
@@ -1223,6 +1385,183 @@ def test_status_distinguishes_an_unreadable_tree_from_a_clean_one(
     assert one.exit_code == 0
     assert "tree: unreadable — git could not report" in one.output
     assert "tree: clean" not in one.output
+
+
+def _running_receipt(store: Store, project: str, pid: int | None) -> InvocationResult:
+    """A `running` checkpoint, as a live run or an uncatchable death leaves it."""
+    trace = InvocationTrace(project, store)
+    trace.result.pid = pid
+    trace.checkpoint()
+    return trace.result
+
+
+def _dead_pid() -> int:
+    proc = subprocess.Popen(["true"])  # noqa: S607
+    proc.wait()
+    return proc.pid
+
+
+def test_status_receipts_name_each_running_receipt_with_its_verdict(
+    tmp_path: Path, caobunga_home: Path
+) -> None:
+    """CBN-421: a dead run shows on `status`, not only on the slug's next `run`."""
+    repo = tmp_path / "webapp"
+    repo.mkdir()
+    runner = _runner()
+    assert runner.invoke(cli, ["register", str(repo)]).exit_code == 0
+    store = Store(caobunga_home)
+    live = _running_receipt(store, "webapp", os.getpid())
+    dead_pid = _dead_pid()
+    stale = _running_receipt(store, "webapp", dead_pid)
+    legacy = _running_receipt(store, "webapp", None)
+    _running_receipt(store, "unregistered", _dead_pid())
+
+    one = runner.invoke(cli, ["status", "webapp"])
+    assert one.exit_code == 0, one.output
+    assert "receipts: 3 at running (1 live, 1 stale, 1 unknown)" in one.output
+    assert f"  {live.receipt_id} live — pid {os.getpid()}, since " in one.output
+    assert f"  {stale.receipt_id} stale — pid {dead_pid} gone, since " in one.output
+    assert "last stage running; the next `caobunga run webapp` reconciles it" in one.output
+    # No pid and no registered path: the lock never proves it dead, so no run will.
+    assert f"  {legacy.receipt_id} unknown — pid unrecorded, since " in one.output
+    assert "no `run` reconciles it: no pid, and not the registered path" in one.output
+
+    fleet = runner.invoke(cli, ["status"])
+    assert fleet.exit_code == 0, fleet.output
+    stale_out = [line for line in fleet.output.splitlines() if line.startswith("stale:")]
+    assert len(stale_out) == 1
+    assert stale_out[0].startswith(f"stale: webapp {stale.receipt_id} — pid {dead_pid} gone")
+
+    # Report-only: the rewrite stays `run`'s, under its lock.
+    assert store.load_invocation(stale.receipt_id).status.value == "running"
+
+
+def test_status_names_what_landed_behind_a_stale_receipt(
+    tmp_path: Path, caobunga_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CBN-444: a dead run's commits show on `status`, both forms, before `run` heals it."""
+    repo = tmp_path / "webapp"
+    repo.mkdir()
+    runner = _runner()
+    assert runner.invoke(cli, ["register", str(repo)]).exit_code == 0
+    store = Store(caobunga_home)
+    _running_receipt(store, "webapp", os.getpid())
+    stale = _running_receipt(store, "webapp", _dead_pid())
+    landed = ["ebab88a feat: NAS-12.N closed", "1234567 docs: status card"]
+    monkeypatch.setattr(invocation_module, "commits_since", lambda _root, _since: landed)
+
+    one = runner.invoke(cli, ["status", "webapp"])
+    assert one.exit_code == 0, one.output
+    lines = one.output.splitlines()
+    at = next(i for i, line in enumerate(lines) if line.startswith(f"  {stale.receipt_id} stale"))
+    assert lines[at + 1] == (
+        "    landed since start: 2 commit(s) — ebab88a feat: NAS-12.N closed; "
+        "1234567 docs: status card"
+    )
+    # Only the stale receipt gets one: a live run's commits are its own business.
+    assert sum("landed since start" in line for line in lines) == 1
+
+    fleet = runner.invoke(cli, ["status"])
+    assert fleet.exit_code == 0, fleet.output
+    [footer] = [line for line in fleet.output.splitlines() if line.startswith("stale:")]
+    assert footer.endswith("reconciles it; landed since start: 2 commit(s)")
+
+    assert store.load_invocation(stale.receipt_id).status.value == "running"
+
+
+def test_stale_receipts_read_landed_commits_from_the_receipts_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real git: a commit after `started_at` is named; live, pid-less and other slugs are not."""
+    repo = tmp_path / "webapp"
+    repo.mkdir()
+    _git(repo, "init")
+    store = Store(tmp_path / "home")
+    stale = _running_receipt(store, "webapp", _dead_pid())
+    stale.path = str(repo)
+    (repo / "landed.py").write_text("landed\n", encoding="utf-8")
+    later = (stale.started_at + timedelta(minutes=5)).isoformat()
+    monkeypatch.setenv("GIT_COMMITTER_DATE", later)
+    monkeypatch.setenv("GIT_AUTHOR_DATE", later)
+    _commit(repo, "feat: landed")
+    # The slug moved since: landed is read from the receipt's own path.
+    record = RegistryRecord(id="webapp", path=str(tmp_path / "moved"))
+    live = _running_receipt(store, "webapp", os.getpid())
+    legacy = _running_receipt(store, "webapp", None)
+    other = _running_receipt(store, "other", _dead_pid())
+
+    verdicts = [(stale, False), (live, True), (legacy, None), (other, False)]
+    [item] = stale_receipts(record, verdicts)
+
+    assert item.receipt_id == stale.receipt_id
+    assert item.pid == stale.pid
+    assert item.last_stage == "running"
+    assert item.landed is not None
+    assert [line.split(" ", 1)[1] for line in item.landed] == ["feat: landed"]
+
+
+def test_landed_line_keeps_unreadable_apart_from_zero() -> None:
+    assert status_render.landed_line(None) == "landed since start: unreadable"
+    assert status_render.landed_line([]) == "landed since start: 0 commit(s) — nothing"
+    many = [f"{n:07d} fix: {n}" for n in range(7)]
+    assert status_render.landed_line(many) == (
+        "landed since start: 7 commit(s) — " + "; ".join(many[:5]) + " (+2 more)"
+    )
+
+
+@pytest.mark.parametrize(
+    ("update", "hint"),
+    [
+        ({}, "the next `caobunga run app` reconciles it"),
+        ({"tier": ExecutionTier.OBSERVE}, "no `run` reconciles it at tier observe"),
+        ({"enabled": False}, "no `run` reconciles it while app is disabled"),
+    ],
+)
+def test_stale_hint_follows_the_gates_run_would_take(
+    tmp_path: Path, update: dict[str, object], hint: str
+) -> None:
+    """An observe or disabled project never reaches `reconcile_stale`; the hint says so."""
+    store = Store(tmp_path)
+    receipt = _running_receipt(store, "app", _dead_pid())
+    record = RegistryRecord(id="app", path=str(tmp_path)).model_copy(update=update)
+    [line] = status_render.stale_lines(record, [(receipt, False)])
+    assert line.endswith(hint)
+
+
+def test_status_drops_a_dead_pid_whose_receipt_finished_meanwhile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run that wrote its terminal receipt and exited after the scan is not stale."""
+    store = Store(tmp_path)
+    receipt = _running_receipt(store, "app", _dead_pid())
+    finished = receipt.model_copy(
+        update={
+            "status": InvocationStatus.COMPLETE,
+            "finished_at": utc_now(),
+            "legacy_exit_code": 0,
+            "successful": True,
+        }
+    )
+    monkeypatch.setattr(store, "load_invocation", lambda _id: finished)
+    assert running_verdicts(store, "app") == []
+    monkeypatch.setattr(store, "load_invocation", lambda _id: receipt)
+    assert running_verdicts(store, "app") == [(receipt, False)]
+
+
+def test_status_receipts_say_none_running_rather_than_going_quiet(
+    tmp_path: Path, caobunga_home: Path
+) -> None:
+    repo = tmp_path / "webapp"
+    repo.mkdir()
+    runner = _runner()
+    assert runner.invoke(cli, ["register", str(repo)]).exit_code == 0
+    _running_receipt(Store(caobunga_home), "other", _dead_pid())
+    one = runner.invoke(cli, ["status", "webapp"])
+    assert one.exit_code == 0, one.output
+    assert "receipts: none running" in one.output
+    fleet = runner.invoke(cli, ["status"])
+    assert fleet.exit_code == 0, fleet.output
+    assert "stale:" not in fleet.output
 
 
 def test_status_unknown_project(caobunga_home: Path) -> None:  # noqa: ARG001
@@ -1399,7 +1738,7 @@ def test_run_selects_worker_inside_durable_invocation(
     monkeypatch: pytest.MonkeyPatch,
     mode: str | None,
 ) -> None:
-    from test_loop import OPEN_PLAN, _git_repo, _register
+    from conftest import OPEN_PLAN, _git_repo, _green_suite, _register
 
     from caobunga.worker import select_worker
 
@@ -1407,9 +1746,13 @@ def test_run_selects_worker_inside_durable_invocation(
     store = Store(caobunga_home)
     _register(store, repo)
     seen = []
+    # Past the pre-launch baseline (CBN-420) to the selection under test.
+    monkeypatch.setattr(
+        "caobunga.finish.run_fleet_suite", lambda root, st, **_kw: _green_suite(root, st)
+    )
 
-    def select():
-        worker = select_worker()
+    def select(home: Path):
+        worker = select_worker(home)
         seen.append(worker)
         return worker
 
@@ -1492,8 +1835,48 @@ def test_run_unknown_project(caobunga_home: Path) -> None:  # noqa: ARG001
     assert "unknown project" in result.output
 
 
+def test_run_unwritten_receipt_is_one_named_line_and_exit_4(
+    tmp_path: Path,
+    caobunga_home: Path,  # noqa: ARG001 — isolates the store
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CBN-442: a full disk at the receipt write is named, not a traceback."""
+    from conftest import EXHAUSTED_PLAN, _git_repo
+
+    repo = _git_repo(tmp_path / "exh", EXHAUSTED_PLAN)
+    runner = _runner()
+    assert runner.invoke(cli, ["register", str(repo), "--id", "exh"]).exit_code == 0
+
+    def full(*_args: object) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(Store, "write_invocation", full)
+    result = runner.invoke(cli, ["run", "exh"])
+    assert result.exit_code == 4, result.output
+    assert "invocation-record-unwritten: No space left on device\n" in result.output
+    assert "recovery: fix what stopped the write" in result.output
+    assert "Traceback" not in result.output
+    assert "invocation-record: " not in result.output
+
+
+def test_run_unwritten_receipt_still_dumps_the_last_run_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CBN-442 review: with no receipt, the record is what says what committed."""
+    record = _sample_run()
+
+    def full(*args: object, **kwargs: object) -> None:  # noqa: ARG001
+        raise ReceiptUnwritten("No space left on device", record=record)
+
+    monkeypatch.setattr("caobunga.cli.execute_run", full)
+    result = _runner().invoke(cli, ["run", "app"])
+    assert result.exit_code == 4
+    assert "task_id: CBN-011" in result.output
+    assert "invocation-record-unwritten: No space left on device" in result.output
+
+
 def test_run_observe_and_exhausted(tmp_path: Path, caobunga_home: Path) -> None:
-    from test_loop import EXHAUSTED_PLAN, OPEN_PLAN, _git_repo
+    from conftest import EXHAUSTED_PLAN, OPEN_PLAN, _git_repo
 
     observed = _git_repo(tmp_path / "obs", OPEN_PLAN)
     empty = _git_repo(tmp_path / "exh", EXHAUSTED_PLAN)
@@ -1655,8 +2038,7 @@ def test_new_rows_stay_off_the_fleet_table(tmp_path: Path, caobunga_home: Path) 
 
 
 def test_the_report_states_the_filing_condition_the_gate_refuses_on(
-    tmp_path: Path,
-    caobunga_home: Path,  # noqa: ARG001
+    tmp_path: Path, caobunga_home: Path
 ) -> None:
     """Gate and report state the same fact, each in its own register (CBN-138.4).
 
@@ -1671,6 +2053,8 @@ def test_the_report_states_the_filing_condition_the_gate_refuses_on(
     )
     runner = _runner()
     assert runner.invoke(cli, ["register", str(repo), "--tier", "proceed-on-green"]).exit_code == 0
+    # A PLAN edit is a filing only after a run that filed rows (CBN-435).
+    _new_rows_baseline(caobunga_home, [NewRow(task_id="CBN-099")])
 
     out = runner.invoke(cli, ["status", "webapp"])
     assert out.exit_code == 0
@@ -1683,6 +2067,40 @@ def test_the_report_states_the_filing_condition_the_gate_refuses_on(
     tree_start = out.output.index("tree:")
     tree_end = out.output.index("last run:", tree_start)
     assert "git -C" not in out.output[tree_start:tree_end]
+
+
+def test_the_report_reads_note_ownership_from_the_last_run(
+    tmp_path: Path, caobunga_home: Path
+) -> None:
+    """The report's filing note follows the gate's owned set (CBN-434, CBN-130).
+
+    A note becomes a filing once the last run's record names its id, here as a
+    `new_rows` entry. The gate reads the same record, so the two cannot diverge.
+    """
+    repo = _git_flaitron_repo(tmp_path, TREE_PLAN)
+    (repo / ".flaitron" / "tasknote" / "CBN-099.md").write_text(
+        "---\nstatus: starter\n---\n", encoding="utf-8"
+    )
+    runner = _runner()
+    assert runner.invoke(cli, ["register", str(repo), "--tier", "proceed-on-green"]).exit_code == 0
+
+    before = runner.invoke(cli, ["status", "webapp"])
+    assert before.exit_code == 0
+    assert "filing artifact" not in before.output
+
+    Store(caobunga_home).write_run(
+        RunRecord(
+            project="webapp",
+            task_id="CBN-001",
+            outcome=Outcome.BLOCKED,
+            closed_at=utc_now(),
+            summary="parked after filing",
+            new_rows=[NewRow(task_id="CBN-099")],
+        )
+    )
+    after = runner.invoke(cli, ["status", "webapp"])
+    assert after.exit_code == 0
+    assert "every blocking line is a flaitron filing artifact" in after.output
 
 
 def test_operator_dirt_draws_no_filing_note(tmp_path: Path, caobunga_home: Path) -> None:  # noqa: ARG001
@@ -1703,7 +2121,7 @@ def test_run_red_suite_keeps_exit_zero_but_exposes_unsuccessful_receipt(
     caobunga_home: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from test_loop import (
+    from conftest import (
         OPEN_PLAN,
         FakeWorker,
         _close_worker,

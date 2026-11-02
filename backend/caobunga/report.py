@@ -13,7 +13,7 @@ their `hermes_*` keys: readable, no longer written.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from caobunga.errors import ReportError, UserError, WorkerError
@@ -32,17 +32,24 @@ def report(
     *,
     echo: Callable[[str], None] | None,
     publish: Callable[[Store, RunRecord], Path] | None,
+    parked: Sequence[str] = (),
 ) -> None:
-    """Run the report surfaces. A failed card write escalates as `ReportError`."""
+    """Run the report surfaces. A failed card write escalates as `ReportError`.
+
+    `parked` is this invocation's park handoff lines so far (CBN-443), for the
+    default card; an injected `publish` is a test seam and does not take them.
+    """
     root = Path(record.path)
     try:
         # The card write is the less important of the two surfaces, so its
         # failure is held and re-raised at the end rather than skipping the
         # rollup (CBN-EPIC-9.5 F4).
-        publisher = publish if publish is not None else write_status_card
         github_error: Exception | None = None
         try:
-            status_path = publisher(store, run)
+            if publish is not None:
+                status_path = publish(store, run)
+            else:
+                status_path = write_status_card(store, run, parked=parked)
         except (UserError, WorkerError) as exc:
             github_error = exc
             if echo is not None:

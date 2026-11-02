@@ -42,8 +42,17 @@ def test_format_status_omits_optional_fields() -> None:
     assert "- **summary:** The reader picks the next task.\n" in body
     assert "**commit:**" not in body
     assert "**next:**" not in body
+    assert "**parked:**" not in body
     assert "transcript" not in body.lower()
     assert "## 📝" not in body
+
+
+def test_format_status_lists_the_invocation_parks_last() -> None:
+    """CBN-443: a drain that went on past a park still names it on the card."""
+    handoff = "parked CBN-010 (drift) → resume /ft-task CBN-010; continued with CBN-011"
+    body = format_status(_run(), [handoff])
+    summary = "- **summary:** The reader picks the next task.\n"
+    assert body.endswith(f"{summary}- **parked:** {handoff}\n")
 
 
 def test_format_status_includes_sha_and_next() -> None:

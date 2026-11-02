@@ -11,8 +11,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
 
-from caobunga.taskmap import resolve
-from caobunga.usage import V1_PROVIDERS, Leftover, ProviderUsage, probe_all
+from caobunga.taskmap import frontier_family, resolve
+from caobunga.usage import V1_PROVIDERS, Leftover, ProviderUsage, WorkerProvider, probe_all
 
 
 class PickReason(StrEnum):
@@ -38,8 +38,17 @@ class Pick(BaseModel):
     why: str
 
 
-_ORDER = {provider.value: index for index, provider in enumerate(V1_PROVIDERS)}
-_KNOWN = frozenset(_ORDER)
+# Default preference when leftover gives no signal: codex > claude > grok. Distinct from
+# `V1_PROVIDERS`, which is the roster order the CONTRACT tables are keyed to.
+PICK_ORDER: tuple[WorkerProvider, ...] = (
+    WorkerProvider.CODEX,
+    WorkerProvider.CLAUDE,
+    WorkerProvider.GROK,
+    WorkerProvider.CURSOR,
+    WorkerProvider.OPENCODE,
+)
+_ORDER = {provider.value: index for index, provider in enumerate(PICK_ORDER)}
+_KNOWN = frozenset(provider.value for provider in V1_PROVIDERS)
 
 
 def pick(
@@ -53,7 +62,7 @@ def pick(
     """Pick a provider + runtime model. Unknown / ineligible → ValueError.
 
     `providers` is the registry allow-list: candidates are filtered to it and the
-    declared order replaces `V1_PROVIDERS` as the tiebreak. Leftover still ranks
+    declared order replaces `PICK_ORDER` as the tiebreak. Leftover still ranks
     first, so a real budget signal beats the operator's ordering. The singular
     `provider` pin is a hard override and ignores the allow-list entirely.
     """
@@ -93,6 +102,13 @@ def _override(
 ) -> Pick:
     if provider not in _KNOWN:
         msg = f"unknown provider {provider!r}"
+        raise ValueError(msg)
+    # A registration error before a machine-state one: exit 2, not 5 (CBN-448).
+    if model is not None and (family := frontier_family(model)) is not None:
+        msg = (
+            f"model pin {model!r} names the frontier family {family!r}; "
+            "caobunga's runner cap never launches a frontier model"
+        )
         raise ValueError(msg)
     if row is not None and not row.installed:
         msg = f"provider {provider!r} is not installed"

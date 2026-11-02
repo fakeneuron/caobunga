@@ -178,11 +178,52 @@ build:
     if [ -d landing ];  then echo "› landing: build";  (cd landing  && npm run build); ran=1; fi
     if [ "$ran" = 0 ] && [ -f package.json ]; then echo "› root: build"; npm run build; fi
 
-# Project-only recipes (CBN-367), absent from Fleet HQ's templates/justfile —
+# Project-only recipes (CBN-367, CBN-381), absent from Fleet HQ's templates/justfile —
 # another reason, beside `lint`, to decline layer-refresh's re-copy of this file.
 
-# build a one-commit snapshot of the public ship set into OUT, then scan it
-public-export OUT="dist/public-export" AUTHOR="fakeneuron <fakeneuron@users.noreply.github.com>":
+# prepend a VERSION section to CHANGELOG.md listing every PLAN Completed row not yet in it
+changelog VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Project-specific (CBN-381). Reads the flaitron plan files, which the public
+    # export leaves out, so it runs only in the private repo. Rows go in as
+    # `- <ID> <shortname>`: a legacy row's long description may name a private
+    # repo, so it is never copied, and a row matching the export denylist
+    # (`public-export-scan`'s source) goes in as `- <ID> (internal)`.
+    ver="{{VERSION}}"; log="CHANGELOG.md"; plan=".flaitron/PLAN.md"; archive=".flaitron/PLAN-ARCHIVE.md"
+    [[ "$ver" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]] || { echo "✗ VERSION must be X.Y.Z, got '$ver'"; exit 1; }
+    for f in "$plan" "$archive"; do
+      [ -f "$f" ] || { echo "✗ $f missing — run this from the private repo"; exit 1; }
+    done
+    deny="$("{{just_executable()}}" _export-denylist)"
+    if [ -f "$log" ] && grep -qF -- "## $ver —" "$log"; then echo "✗ $log already has a $ver section"; exit 1; fi
+    listed="$(if [ -f "$log" ]; then grep -oE '^- [^ ]+' "$log" | cut -c3-; fi)"
+    # A checked row without the ` | <shortname> — ` shape fails the run rather
+    # than silently missing every section.
+    new="$({ sed -n '/^## Completed/,/^## /p' "$plan"; cat "$archive"; } \
+      | { grep -E '^[[:space:]]*- \[x\] \*\*' || true; } \
+      | perl -ne 'if (/^\s*- \[x\] \*\*([A-Z][\w.-]*)\*\*.*? \| (.+?) — /) { print "$1 $2\n" } else { push @bad, $_ }
+          END { if (@bad) { print STDERR "✗ Completed rows without a ` | <shortname> — ` segment:\n", @bad; exit 1 } }' \
+      | awk 'NR==FNR { if ($1 != "") seen[$1]=1; next } !seen[$1]++' <(printf '%s\n' "$listed") -)"
+    [ -n "$new" ] || { echo "✗ no Completed row is missing from $log — nothing to release"; exit 1; }
+    # Exit 1 is "no match"; a grep error (a bad denylist regex) fails closed.
+    rc=0; hit="$(printf '%s\n' "$new" | grep -iE -f <(printf '%s\n' "$deny") | cut -d' ' -f1)" || rc=$?
+    [ "$rc" -le 1 ] || { echo "✗ denylist grep failed (exit $rc)"; exit 1; }
+    new="$(printf '%s\n' "$new" \
+      | awk 'NR==FNR { if ($1 != "") hit[$1]=1; next } { print (($1 in hit) ? $1 " (internal)" : $0) }' <(printf '%s\n' "$hit") -)"
+    section="$(printf '## %s — %s\n\n' "$ver" "$(date +%F)"; printf '%s\n' "$new" | sed 's/^/- /')"
+    if [ ! -f "$log" ]; then
+      printf '# Changelog\n\nEach section lists the tasks closed since the previous release, by task ID and short name.\n' > "$log"
+    fi
+    if grep -q '^## ' "$log"; then
+      SECTION="$section" perl -0pi -e 's/^(?=## )/$ENV{SECTION}\n\n/m' "$log"
+    else
+      printf '\n%s\n' "$section" >> "$log"
+    fi
+    echo "› $log: $ver lists $(printf '%s\n' "$new" | wc -l | tr -d ' ') rows"
+
+# build the public ship set into OUT as the next commit on PUBLIC's main, tag it, then scan it
+public-export OUT="dist/public-export" AUTHOR="fakeneuron <fakeneuron@users.noreply.github.com>" PUBLIC="https://github.com/fakeneuron/caobunga.git":
     #!/usr/bin/env bash
     set -euo pipefail
     # Project-specific, not a fleet verb (CBN-367; docs/decisions/open-source-scrub.md).
@@ -195,6 +236,16 @@ public-export OUT="dist/public-export" AUTHOR="fakeneuron <fakeneuron@users.nore
     # `.claude/settings.json`, whose only rule fences the submodule dogfood
     # archive (CBN-374). Reads committed HEAD via `git archive`, so working-tree
     # edits never ship.
+    # just parameters are positional: `OUT=/path` binds the whole string to OUT
+    # and the export lands in `./OUT=/path`. Refuse before anything is written.
+    for arg in "{{OUT}}" "{{AUTHOR}}" "{{PUBLIC}}"; do
+      case "$arg" in
+        OUT=*|AUTHOR=*|PUBLIC=*)
+          echo "✗ '$arg' is a KEY=value argument, but just parameters are positional:"
+          echo "    just public-export <OUT> <AUTHOR> <PUBLIC>   (e.g. just public-export /tmp/x \"\$author\" \"\")"
+          exit 1 ;;
+      esac
+    done
     out="{{OUT}}"; author="{{AUTHOR}}"
     # Marker inside the snapshot's .git (never shipped): OUT is only ever
     # deleted when an earlier run of this recipe made it.
@@ -235,14 +286,15 @@ public-export OUT="dist/public-export" AUTHOR="fakeneuron <fakeneuron@users.nore
     pointer='Planning and task tracking (flaitron) live in the private repo this snapshot is exported from; they are not shipped here.'
     POINTER="$pointer" perl -0pi -e 's/^## Workflow\n.*?(?=^## |\z)/## Workflow\n\n$ENV{POINTER}\n\n/ms; s/\n+\z/\n/' "$agents" "$claude"
     perl -0pi -e 's/ \(Flaitron \+ per-repo sections\)//' "$claude"
-    perl -0pi -e 's/ and `\.flaitron\/PLAN\.md` \(folded from `SEED-PLAN\.md` on [0-9-]+\)//;
+    perl -0pi -e 's/ and `\.flaitron\/PLAN\.md` \(folded from `docs\/history\/SEED-PLAN\.md` on [0-9-]+\)//;
       s/ Registered in `\.flaitron\/tasknote\/README\.md`\.//;
       s/ and the cited CBN-tasknote archive//;
       s/^- `\/ft-audit` is forked as a \*\*thin overlay\*\*.*\n(?:[ \t]+\S.*\n)*//m;
       s/`\.pre-commit-config\.yaml`, `\.cursorrules`, and `\.editorconfig`(.*?)for all four\*\*/`.pre-commit-config.yaml`, and `.editorconfig`$1for all three**/;
       s/The skill and\s+the `\/audit` overlay are the only project-owned entries in `\.claude\/skills\/` —\s+everything else there is a symlink into the flaitron submodule, which is read-only\./The skill is the only entry shipped in `.claude\/skills\/`./' "$agents"
     perl -0pi -e 's/; active work is tracked in \[`\.flaitron\/PLAN\.md`\]\(\.flaitron\/PLAN\.md\)\./; active work is tracked in the private repo this snapshot is exported from./' "$readme"
-    perl -0pi -e 's/^# Submodule dogfood archive\b.*\n(?:#.*\n)*\.flaitron\/core\/\.flaitron\/\n\n?//m' "$cursorignore"
+    # Keyed on the path line, not the header wording, which deposit refreshes reword (NAT-505).
+    perl -0pi -e 's/(?:^#.*\n)*^\.flaitron\/core\/\.flaitron\/\n\n?//m' "$cursorignore"
     absent '\.flaitron|ft-audit|skills.audit|symlink into|CBN-tasknote|cursorrules' "$agents"
     absent '\.flaitron|ft-task|Handoff|Flaitron \+' "$claude"
     absent '\(\.flaitron/PLAN\.md\)' "$readme"
@@ -252,14 +304,53 @@ public-export OUT="dist/public-export" AUTHOR="fakeneuron <fakeneuron@users.nore
     find "$out" -name '*.md' ! -path "$out/.git/*" -print0 \
       | xargs -0 perl -pi -e 's/\[([^\]]*)\]\([^)]*\.flaitron[^)]*\)/$1/g'
     absent '\]\([^)]*\.flaitron|^[[:space:]]*\[[^]]+\]:[[:space:]]*[^[:space:]]*\.flaitron' -r --include='*.md' --exclude-dir=.git "$out"
+    # Release version (CBN-381): pyproject.toml is the source; the other
+    # manifests and a CHANGELOG section must agree before anything is tagged.
+    ver="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$out/backend/pyproject.toml")"; tag="v$ver"
+    [ -n "$ver" ] || { echo "✗ no version in backend/pyproject.toml"; exit 1; }
+    grep -qxF "__version__ = \"$ver\"" "$out/backend/caobunga/__init__.py" \
+      || { echo "✗ backend/caobunga/__init__.py __version__ is not $ver"; exit 1; }
+    grep -qxF "  \"version\": \"$ver\"," "$out/frontend/package.json" \
+      || { echo "✗ frontend/package.json version is not $ver"; exit 1; }
+    grep -A1 -xF 'name = "caobunga"' "$out/backend/uv.lock" | grep -qxF "version = \"$ver\"" \
+      || { echo "✗ backend/uv.lock is not at $ver — run: uv lock --project backend"; exit 1; }
+    grep -m1 '^  "version": ' "$out/frontend/package-lock.json" | grep -qxF "  \"version\": \"$ver\"," \
+      || { echo "✗ frontend/package-lock.json is not at $ver — run: npm --prefix frontend version $ver --no-git-tag-version"; exit 1; }
+    grep -qF -- "## $ver —" "$out/CHANGELOG.md" \
+      || { echo "✗ CHANGELOG.md has no $ver section — run: just changelog $ver"; exit 1; }
     name="${author% <*}"; email="${author##*<}"; email="${email%>}"
+    export GIT_AUTHOR_NAME="$name" GIT_AUTHOR_EMAIL="$email" GIT_COMMITTER_NAME="$name" GIT_COMMITTER_EMAIL="$email"
     git -C "$out" init -q -b main
+    # Build on public main so a republish is a fast-forward push that keeps
+    # clones, forks and tags (CBN-381). PUBLIC="" makes a root commit instead.
+    # The fresh index holds only the snapshot, so the commit's tree is exactly
+    # the snapshot: a file dropped since the last export becomes a deletion.
+    public="{{PUBLIC}}"; base=""
+    if [ -n "$public" ]; then
+      if [ -d "$public" ]; then public="$(cd "$public" && pwd)"; fi  # git -C would re-root a relative path
+      git -C "$out" fetch -q --tags "$public" main || { echo "✗ cannot fetch main from $public"; exit 1; }
+      if git -C "$out" rev-parse -q --verify "refs/tags/$tag" > /dev/null; then
+        echo "✗ $public already has $tag — bump the version and run: just changelog <new version>"; exit 1
+      fi
+      git -C "$out" update-ref refs/heads/main FETCH_HEAD
+      base=" on $(git -C "$out" rev-parse --short HEAD)"
+    fi
     # --force: ship what HEAD tracks even where a shipped or global ignore rule matches.
     git -C "$out" add -A --force
-    GIT_AUTHOR_NAME="$name" GIT_AUTHOR_EMAIL="$email" GIT_COMMITTER_NAME="$name" GIT_COMMITTER_EMAIL="$email" \
-      git -C "$out" -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -q -m "Caobunga public snapshot"
-    echo "› snapshot: $out ($(git -C "$out" ls-files | wc -l | tr -d ' ') files, one commit $(git -C "$out" rev-parse --short HEAD))"
+    git -C "$out" -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -q -m "Caobunga $tag"
+    git -C "$out" -c tag.gpgsign=false tag -a "$tag" -m "Caobunga $tag"
+    echo "› snapshot: $out ($(git -C "$out" ls-files | wc -l | tr -d ' ') files, commit $(git -C "$out" rev-parse --short HEAD)$base, tagged $tag)"
     "{{just_executable()}}" public-export-scan "$out"
+
+# print the export denylist (shared by changelog and public-export-scan); private-repo only
+_export-denylist:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    doc="docs/decisions/open-source-scrub.md"
+    [ -f "$doc" ] || { echo "✗ $doc missing — run this from the private repo" >&2; exit 1; }
+    deny="$(sed -n '/^```public-export-denylist$/,/^```$/{/^```/d;p;}' "$doc")"
+    [ -n "$deny" ] || { echo "✗ no public-export-denylist block in $doc" >&2; exit 1; }
+    printf '%s\n' "$deny"
 
 # re-run every open-source-scrub scan class on a snapshot repo; fails on any hit
 public-export-scan DIR="dist/public-export":
@@ -269,11 +360,9 @@ public-export-scan DIR="dist/public-export":
     # The private-name denylist is that file's `public-export-denylist` block and
     # the email is read at run time — never written here, because this justfile
     # ships in the export and would leak them (and fail its own scan).
-    dir="{{DIR}}"; doc="docs/decisions/open-source-scrub.md"
+    dir="{{DIR}}"
     [ -d "$dir/.git" ] || { echo "✗ $dir is not a git repo"; exit 1; }
-    [ -f "$doc" ] || { echo "✗ $doc missing — run the scan from the private repo"; exit 1; }
-    deny="$(sed -n '/^```public-export-denylist$/,/^```$/{/^```/d;p;}' "$doc")"
-    [ -n "$deny" ] || { echo "✗ no public-export-denylist block in $doc"; exit 1; }
+    deny="$("{{just_executable()}}" _export-denylist)"
     email="$(git config user.email || true)"
     [ -n "$email" ] || { echo "✗ git config user.email is empty — nothing to scan for"; exit 1; }
     fail=0

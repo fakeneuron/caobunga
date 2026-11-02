@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import pytest
 
-from caobunga.local import RECIPES
+from caobunga.recipes import RECIPES
 from caobunga.taskmap import (
     ALIASES,
     EFFORT,
+    FRONTIER_FAMILIES,
     MODELS,
     TaskClass,
     classify,
+    frontier_family,
     resolve,
     resolve_effort,
 )
@@ -29,6 +31,8 @@ def test_classify_aliases_match_spec_inherent_tiers() -> None:
     assert classify("light") is TaskClass.LIGHT
     assert classify("HAIKU") is TaskClass.LIGHT
     assert classify("sonnet") is TaskClass.MEDIUM
+    assert classify("MODERATE") is TaskClass.MEDIUM
+    assert classify("medium") is TaskClass.MEDIUM
     assert classify(" grok ") is TaskClass.MEDIUM
     assert classify("codex") is TaskClass.MEDIUM
     assert classify("xheavy") is TaskClass.HEAVY
@@ -36,11 +40,13 @@ def test_classify_aliases_match_spec_inherent_tiers() -> None:
     # The frontier band is denied at launch (CBN-331), so it has no alias.
     assert classify("fable") is TaskClass.MEDIUM
     assert classify("mythos") is TaskClass.MEDIUM
+    assert classify("astra") is TaskClass.MEDIUM
     assert classify("frontier") is TaskClass.MEDIUM
     assert set(ALIASES) == {
         "light",
         "haiku",
         "medium",
+        "moderate",
         "sonnet",
         "grok",
         "codex",
@@ -65,7 +71,7 @@ def test_pinned_runtime_models() -> None:
     assert resolve("heavy", WorkerProvider.CLAUDE) == "opus"
     assert resolve("sonnet", WorkerProvider.CLAUDE) == "sonnet"
     assert resolve("fable", WorkerProvider.CLAUDE) == "opus"
-    assert resolve(None, WorkerProvider.CODEX) == "gpt-5.6-terra"
+    assert resolve(None, WorkerProvider.CODEX) == "gpt-6.1-sol"
     assert resolve("light", WorkerProvider.CURSOR) == "composer-2.5"
     assert resolve("medium", WorkerProvider.CURSOR) == "grok-4.7-high"
     assert resolve("opus", WorkerProvider.CURSOR) == "grok-4.7-xhigh"
@@ -103,13 +109,13 @@ def test_opencode_stays_named_and_recipe_less() -> None:
 
 
 def test_effort_rungs_are_the_decided_mapping() -> None:
-    """Each row is that provider's flaitron tier-by-platform column (CBN-331, CBN-332).
+    """Each row is that provider's flaitron v7.4.0 tier-by-platform column (CBN-416).
 
-    grok light is the upper end of medium-high (CBN-360), so it shares medium's rung.
+    Grok light is `medium`. Codex is Sol at medium/medium/high.
     """
     assert EFFORT == {
         WorkerProvider.GROK: {
-            TaskClass.LIGHT: "high",
+            TaskClass.LIGHT: "medium",
             TaskClass.MEDIUM: "high",
             TaskClass.HEAVY: "xhigh",
         },
@@ -120,8 +126,8 @@ def test_effort_rungs_are_the_decided_mapping() -> None:
         },
         WorkerProvider.CODEX: {
             TaskClass.LIGHT: "medium",
-            TaskClass.MEDIUM: "high",
-            TaskClass.HEAVY: "xhigh",
+            TaskClass.MEDIUM: "medium",
+            TaskClass.HEAVY: "high",
         },
     }
 
@@ -130,10 +136,13 @@ def test_resolve_effort_follows_classify() -> None:
     assert resolve_effort("light", WorkerProvider.CLAUDE) == "high"
     assert resolve_effort("HAIKU", WorkerProvider.CLAUDE) == "high"
     assert resolve_effort("sonnet", WorkerProvider.CLAUDE) == "medium"
-    assert resolve_effort("light", WorkerProvider.GROK) == "high"
+    assert resolve_effort("light", WorkerProvider.GROK) == "medium"
+    assert resolve_effort("moderate", WorkerProvider.GROK) == "high"
     assert resolve_effort(" grok ", WorkerProvider.GROK) == "high"
     assert resolve_effort("opus", WorkerProvider.GROK) == "xhigh"
-    assert resolve_effort("xheavy", WorkerProvider.CODEX) == "xhigh"
+    assert resolve_effort("xheavy", WorkerProvider.CODEX) == "high"
+    assert resolve_effort("moderate", WorkerProvider.CODEX) == "medium"
+    assert resolve("moderate", WorkerProvider.CODEX) == "gpt-6.1-sol"
 
 
 def test_resolve_effort_omit_and_unknown_are_the_medium_rung() -> None:
@@ -173,17 +182,62 @@ def test_effort_rungs_sit_in_each_vendor_ladder() -> None:
         assert set(table.values()) <= ladders[provider]
 
 
-def test_every_class_dispatches_distinctly_on_each_effort_provider() -> None:
-    """CBN-332: no two classes share both model id and rung, except grok light/medium.
+EFFORT_CAP = {"low", "medium", "high", "xhigh"}
 
-    CBN-360 takes grok's light cell at the upper end of medium-high, so light and
-    medium share grok-4.7 @ high. Heavy stays xhigh. Codex and claude stay distinct.
+
+def test_runner_cap_effort_never_exceeds_xhigh() -> None:
+    """CBN-448: flaitron EXTERNAL-AGENTS step 11 caps a caller's effort at `xhigh`."""
+    for table in EFFORT.values():
+        assert set(table.values()) <= EFFORT_CAP
+    for table in MODELS.values():
+        for model in table.values():
+            baked = model.rsplit("-", 1)[-1]
+            if baked in {"max", "ultra", *EFFORT_CAP}:
+                assert baked in EFFORT_CAP, model
+
+
+def test_runner_cap_no_pin_names_a_frontier_family() -> None:
+    """CBN-448: heavy-ceiling families only; never Fable / Mythos / Astra."""
+    for table in MODELS.values():
+        for model in table.values():
+            assert frontier_family(model) is None, model
+
+
+@pytest.mark.parametrize(
+    ("model", "family"),
+    [
+        ("fable", "fable"),
+        ("claude-Fable-5-1", "fable"),
+        ("mythos-preview", "mythos"),
+        ("gpt-6-astra", "astra"),
+        ("GPT-6.Astra_preview", "astra"),
+        ("opus", None),
+        ("gpt-6.1-sol", None),
+        ("grok-4.7-xhigh", None),
+        ("affable-1", None),
+        ("pastrami-2", None),
+    ],
+)
+def test_frontier_family_matches_a_case_folded_word(model: str, family: str | None) -> None:
+    assert frontier_family(model) == family
+
+
+def test_runner_cap_families_are_the_plan_frontier_names() -> None:
+    assert FRONTIER_FAMILIES == ("fable", "mythos", "astra")
+
+
+def test_every_class_dispatches_distinctly_on_each_effort_provider() -> None:
+    """CBN-332: no two classes share both model id and rung, except codex light/medium.
+
+    v7.4.0 maps Codex light and moderate both to Sol @ medium (CBN-416), and
+    Sol is the pin (CBN-454), so those two classes share gpt-6.1-sol @ medium.
+    Heavy is sol @ high. Grok's three rungs are distinct again.
     """
     for provider in EFFORT:
         dispatched = {
             (resolve(c.value, provider), resolve_effort(c.value, provider)) for c in TaskClass
         }
-        if provider == WorkerProvider.GROK:
-            assert dispatched == {("grok-4.7", "high"), ("grok-4.7", "xhigh")}
+        if provider == WorkerProvider.CODEX:
+            assert dispatched == {("gpt-6.1-sol", "medium"), ("gpt-6.1-sol", "high")}
             continue
         assert len(dispatched) == len(TaskClass), provider

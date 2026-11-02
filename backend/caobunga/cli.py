@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import shlex
 from collections import Counter
 from collections.abc import Callable
 from functools import wraps
@@ -15,20 +17,25 @@ from rich.table import Table
 
 from caobunga import __version__, install_provenance, pins
 from caobunga.digest import format_digest
-from caobunga.errors import ReportError, UserError
-from caobunga.flaitron import marker_drift, try_read_project
+from caobunga.echo_style import run_echo
+from caobunga.errors import ReceiptUnwritten, ReportError, UserError
+from caobunga.flaitron import PARK_UNCOMMITTED, marker_drift, park_commits, try_read_project
 from caobunga.fleet import DEFAULT_JOBS, fleet_exit, run_fleet
-from caobunga.local import hooks_available
+from caobunga.invocation import running_verdicts, stale_receipts
 from caobunga.loop import execute_run
 from caobunga.models import (
     ID_PATTERN,
     ExecutionTier,
+    InvocationResult,
     Outcome,
     RegistryRecord,
+    RetainedWorktree,
     RunRecord,
     utc_now,
 )
 from caobunga.presence import read_tree
+from caobunga.recipes import hooks_available
+from caobunga.retained import report_retained, retained_worktrees
 from caobunga.status_render import (
     coverage_cell,
     dump_run_record,
@@ -37,10 +44,14 @@ from caobunga.status_render import (
     format_fleet_seed,
     format_new_rows,
     format_pins,
+    format_receipts,
+    format_retained,
     format_seed_block,
     format_tree,
     outcome_cell,
+    retained_footer,
     review_cell,
+    stale_lines,
     suite_cell,
     tree_cell,
 )
@@ -132,6 +143,19 @@ def parse_providers(raw: str | None) -> list[str] | None:
     return tokens or None
 
 
+def parse_bootstrap(raw: str | None) -> list[str] | None:
+    """`--bootstrap` → the argv it names, split like a shell would but never run by one."""
+    if raw is None:
+        return None
+    try:
+        argv = shlex.split(raw)
+    except ValueError as exc:
+        raise UserError(f"cannot parse --bootstrap {raw!r}: {exc}") from exc
+    if not argv:
+        raise UserError("empty --bootstrap; use --clear-bootstrap to remove one")
+    return argv
+
+
 def derive_id(resolved: Path, explicit: str | None) -> str:
     if explicit is not None:
         candidate = explicit
@@ -168,8 +192,8 @@ def cli() -> None:
 @click.option(
     "--tier",
     type=click.Choice(TIER_CHOICES, case_sensitive=True),
-    default=ExecutionTier.GATED.value,
-    show_default=True,
+    default=None,
+    help="Execution tier. New record: gated. Re-register: omit = keep the stored tier.",
 )
 @click.option("--replace", is_flag=True, help="Overwrite an existing id at a different path.")
 @click.option(
@@ -186,17 +210,48 @@ def cli() -> None:
     "--providers",
     default=None,
     help="Comma-separated allow-list the picker may choose from, best-first. "
-    "Conflicts with --provider. Omit = every installed worker is eligible.",
+    "Conflicts with --provider. Omit = the global default (`caobunga providers`), "
+    "else every installed worker is eligible.",
+)
+@click.option(
+    "--clear-providers",
+    is_flag=True,
+    help="Drop this record's allow-list so it falls back to the global default.",
+)
+@click.option(
+    "--bootstrap",
+    default=None,
+    help='Command a fresh execution worktree runs before its baseline suite, e.g. "just setup". '
+    "Split like a shell would; never run through one. Stored and served in plain text: "
+    "never put a secret in it.",
+)
+@click.option(
+    "--bootstrap-timeout",
+    type=click.FloatRange(min=0, min_open=True),
+    default=None,
+    help="Seconds the bootstrap may run. Requires --bootstrap. Omit = 600.",
+)
+@click.option("--clear-bootstrap", is_flag=True, help="Drop the bootstrap command and its timeout.")
+@click.option(
+    "--isolate/--no-isolate",
+    default=None,
+    help="Run each launched task in its own wt-<ID> worktree and land a green close by "
+    "fast-forward. Omit = keep the stored setting (off for a new record).",
 )
 @_handle_user_error
 def register(
     path: Path,
     project_id: str | None,
-    tier: str,
+    tier: str | None,
     replace: bool,
     provider: str | None,
     model: str | None,
     providers: str | None,
+    clear_providers: bool,
+    bootstrap: str | None,
+    bootstrap_timeout: float | None,
+    clear_bootstrap: bool,
+    isolate: bool | None,
 ) -> None:
     """Write a registry record. Default tier gated."""
     resolved = resolve_register_path(path)
@@ -210,19 +265,63 @@ def register(
         # A pin beats even an exhausted worker; an allow-list is a preference
         # inside an eligibility filter. Ranking one over the other would be a guess.
         raise UserError("--provider and --providers are mutually exclusive")
+    if clear_providers and providers is not None:
+        raise UserError("--providers and --clear-providers are mutually exclusive")
+    if clear_bootstrap and (bootstrap is not None or bootstrap_timeout is not None):
+        raise UserError("--clear-bootstrap conflicts with --bootstrap and --bootstrap-timeout")
+    if bootstrap_timeout is not None and bootstrap is None:
+        raise UserError("--bootstrap-timeout requires --bootstrap")
+    if bootstrap_timeout is not None and not math.isfinite(bootstrap_timeout):
+        raise UserError(
+            f"--bootstrap-timeout must be a finite number of seconds, got {bootstrap_timeout}"
+        )
+    bootstrap_argv = parse_bootstrap(bootstrap)
     record = RegistryRecord(
         id=slug,
         path=str(resolved),
-        tier=ExecutionTier(tier),
+        tier=ExecutionTier(tier or ExecutionTier.GATED.value),
         provider=pin_provider,
         model=pin_model,
         providers=allow_list,
         registered_at=utc_now(),
         enabled=True,
+        bootstrap=bootstrap_argv,
+        bootstrap_timeout=bootstrap_timeout,
+        isolate=isolate,
     )
-    stored = _store().register(record, replace=replace)
+    stored = _store().register(
+        record,
+        replace=replace,
+        keep_tier=tier is None,
+        clear_providers=clear_providers,
+        clear_bootstrap=clear_bootstrap,
+    )
     click.echo(f"registered {stored.id} → {stored.path} ({stored.tier.value})")
     click.echo(probe_fitness(resolved).render())
+    if not park_commits(resolved):
+        click.echo(PARK_UNCOMMITTED.format(id=stored.id))
+
+
+@cli.command("providers")
+@click.argument("order", required=False)
+@click.option("--clear", is_flag=True, help="Remove the global default.")
+@_handle_user_error
+def providers_verb(order: str | None, clear: bool) -> None:
+    """Show or set the global provider allow-list, best-first (CBN-414).
+
+    Used by any record with neither --provider nor --providers. No argument:
+    print it.
+    """
+    store = _store()
+    if order is not None and clear:
+        raise UserError("pass a provider list or --clear, not both")
+    config = store.load_config()
+    if order is not None or clear:
+        allow_list = None if clear else parse_providers(order)
+        if not clear and allow_list is None:
+            raise UserError("empty provider list; use --clear to remove the default")
+        config = store.save_config(config.model_copy(update={"providers": allow_list}))
+    click.echo(f"providers: {', '.join(config.providers) if config.providers else 'none'}")
 
 
 @cli.command()
@@ -274,10 +373,13 @@ def status(project: str | None, seed: bool) -> None:
     table.add_column("review")
     table.add_column("coverage")
     table.add_column("tree")
+    footers: list[str] = []
     for row in rows:
         last = store.last_run(row.id)
-        read = try_read_project(Path(row.path))
+        retained = report_retained(row)
+        read = try_read_project(Path(row.path), retained or ())
         drift = [] if read is None or last is None else marker_drift(read.tasks, last.marked_tasks)
+        footers.extend(retained_footer(row, _retained_listing(store, row, retained)))
         table.add_row(
             row.id,
             row.tier.value,
@@ -287,9 +389,36 @@ def status(project: str | None, seed: bool) -> None:
             suite_cell(last),
             review_cell(last),
             "—" if read is None else coverage_cell(read.coverage, drift),
-            "—" if read is None else tree_cell(read_tree(read, row.path, row.tier)),
+            "—"
+            if read is None
+            else tree_cell(
+                read_tree(read, row.path, row.tier, last_run=last, retained=retained or ())
+            ),
         )
     console.print(table)
+    _echo_fleet_footers(store, rows, footers)
+
+
+def _echo_fleet_footers(store: Store, rows: list[RegistryRecord], retained: list[str]) -> None:
+    """The fleet table's footers: retained worktrees, then stale receipts."""
+    _echo_lines(retained)
+    by_project: dict[str, list[tuple[InvocationResult, bool | None]]] = {}
+    for receipt, alive in running_verdicts(store, None):
+        by_project.setdefault(receipt.project, []).append((receipt, alive))
+    for row in rows:
+        verdicts = by_project.get(row.id, [])
+        _echo_lines(stale_lines(row, verdicts, stale_receipts(row, verdicts)))
+
+
+def _echo_lines(lines: list[str]) -> None:
+    for line in lines:
+        click.echo(line)
+
+
+def _retained_listing(
+    store: Store, record: RegistryRecord, retained: frozenset[str] | None
+) -> list[RetainedWorktree] | None:
+    return retained_worktrees(record, retained, lambda: store.list_runs(record.id))
 
 
 def _print_project_status(store: Store, record: RegistryRecord) -> None:
@@ -299,7 +428,8 @@ def _print_project_status(store: Store, record: RegistryRecord) -> None:
     click.echo(f"enabled: {str(record.enabled).lower()}")
     for line in format_pins(pins.check_all()):
         click.echo(line)
-    read = try_read_project(Path(record.path))
+    retained = report_retained(record)
+    read = try_read_project(Path(record.path), retained or ())
     last = store.last_run(record.id)
     if read is None:
         click.echo("coverage: (unreadable)")
@@ -313,8 +443,13 @@ def _print_project_status(store: Store, record: RegistryRecord) -> None:
             click.echo(line)
         for line in format_new_rows(last):
             click.echo(line)
-        for line in format_tree(read_tree(read, record.path, record.tier)):
+        tree = read_tree(read, record.path, record.tier, last_run=last, retained=retained or ())
+        for line in format_tree(tree):
             click.echo(line)
+    _echo_lines(format_retained(record, _retained_listing(store, record, retained)))
+    verdicts = running_verdicts(store, record.id)
+    for line in format_receipts(record, verdicts, stale_receipts(record, verdicts)):
+        click.echo(line)
     if last is None:
         click.echo("last run: (none)")
         return
@@ -336,19 +471,26 @@ def run(project: str) -> None:
     # one record per close, and a ReportError on close N carries a record no earlier
     # dump covered. A bare flag hid every close after the first (CBN-EPIC-9.5 F3).
     dumped: RunRecord | None = None
+    # TTY-only emoji + color; piped output stays byte-identical (CBN-EPIC-449.4).
+    echo = run_echo()
 
     def on_run(record: RunRecord) -> None:
         nonlocal dumped
         if dumped is record:
             return
         dumped = record
-        click.echo("run:")
+        echo("run:")
         click.echo(dump_run_record(record), nl=False)
 
     try:
-        record = execute_run(project, echo=click.echo, on_run=on_run)
+        record = execute_run(project, echo=echo, on_run=on_run)
     except ReportError as exc:
         on_run(exc.record)
+        raise
+    except ReceiptUnwritten as exc:
+        # The receipt is gone; the last run record is what says what committed (CBN-442).
+        if exc.record is not None:
+            on_run(exc.record)
         raise
     if record is None:
         return

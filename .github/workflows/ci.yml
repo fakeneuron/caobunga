@@ -15,6 +15,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -41,7 +44,7 @@ jobs:
       # gate would silently degrade to "no lines with coverage information",
       # which is indistinguishable from a well-covered diff. Drop it only
       # alongside the coverage steps.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
           # `.flaitron/core` is a submodule (flaitron pin) — required by
@@ -49,6 +52,28 @@ jobs:
           # .flaitron/core/SPEC.md directly and fails FileNotFoundError
           # without it.
           submodules: true
+
+      # ---- Secret scan: gitleaks (spine — runs in every repo, any stack) ----
+      # Before stack installs/builds so a failed gate cannot hide the scan.
+      # Stack-agnostic, so it carries no layout guard. Scans the checked-out
+      # working tree against the Fleet HQ baseline config deposited alongside
+      # this workflow. The pre-commit hook stops secrets before they enter
+      # history; this is the backstop for commits made without it installed.
+      # Pin GITLEAKS_VERSION deliberately — an unpinned scanner changes its own
+      # findings between runs. GITLEAKS_SHA256 is the linux_x64 tarball's hash
+      # (from the release's checksums.txt); bump both together.
+      - name: Secret scan (gitleaks)
+        env:
+          GITLEAKS_VERSION: '8.30.1'
+          GITLEAKS_SHA256: '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb'
+        run: |
+          set -euo pipefail
+          tgz="$RUNNER_TEMP/gitleaks.tar.gz"
+          curl -fsSL --retry 3 --retry-all-errors -o "$tgz" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  $tgz" | sha256sum -c -
+          tar -xzf "$tgz" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" version
+          "$RUNNER_TEMP/gitleaks" dir . --config .gitleaks.toml --no-banner --redact
 
       # Resolve where each stack lives: subdir (frontend/ · backend/) or root.
       # Empty output = that stack isn't present, so its steps are skipped.
@@ -64,7 +89,7 @@ jobs:
       # match this repo's .nvmrc if it pins a different line.
       - name: Set up Node
         if: steps.layout.outputs.fe != ''
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '22'
           cache: npm
@@ -77,7 +102,7 @@ jobs:
       # match this repo's .python-version if it differs.
       - name: Set up Python + uv
         if: steps.layout.outputs.be != '' || steps.layout.outputs.fe != ''
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
         with:
           python-version: '3.13'
           enable-cache: true
@@ -123,7 +148,7 @@ jobs:
       # A red gate is only worth arming if you can see why it went red.
       - name: Upload Playwright report
         if: failure() && steps.layout.outputs.fe != ''
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: playwright-report
           path: ${{ steps.layout.outputs.fe }}/playwright-report/
@@ -239,17 +264,38 @@ jobs:
           uvx "diff-cover@${DIFF_COVER_VERSION}" "$DIR/coverage.xml" \
             --compare-branch="$BASE" --fail-under="$COVERAGE_MIN" --show-uncovered
 
-      # ---- Secret scan: gitleaks (spine — runs in every repo, any stack) ----
-      # Stack-agnostic, so it carries no layout guard. Scans the checked-out
-      # working tree against the Fleet HQ baseline config deposited alongside
-      # this workflow. The pre-commit hook stops secrets before they enter
-      # history; this is the backstop for commits made without it installed.
-      # Pin GITLEAKS_VERSION deliberately — an unpinned scanner changes its own
-      # findings between runs.
-      - name: Secret scan (gitleaks)
+      # ---- Export scan (project-specific, CBN-382) ----
+      # Builds the public-export snapshot of HEAD and runs every scan class on
+      # it, so a leak fails here instead of at republish. `PUBLIC=""` makes one
+      # root commit with no fetch: only HEAD's ship set is scanned, never the
+      # already-public history. Private repo only — the scrub doc holding the
+      # denylist is not shipped, so the public repo skips both steps. The scan's
+      # email class reads `git config user.email`; the runner gets it from the
+      # EXPORT_SCAN_EMAIL secret (docs/decisions/open-source-scrub.md).
+      - name: Set up just
+        if: hashFiles('docs/decisions/open-source-scrub.md') != ''
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+        with:
+          just-version: '1.58.0'
+      - name: Export scan (public-export)
+        if: hashFiles('docs/decisions/open-source-scrub.md') != ''
         env:
-          GITLEAKS_VERSION: '8.30.1'
+          SCAN_EMAIL: ${{ secrets.EXPORT_SCAN_EMAIL }}
         run: |
-          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-            | tar -xz -C "$RUNNER_TEMP" gitleaks
-          "$RUNNER_TEMP/gitleaks" dir . --config .gitleaks.toml --no-banner --redact
+          set -euo pipefail
+          # Trim pasted whitespace: a padded value would never match a real hit.
+          email="$(printf '%s' "${SCAN_EMAIL:-}" | tr -d '[:space:]')"
+          case "$email" in
+            ?*@?*) ;;
+            *) echo "::error::EXPORT_SCAN_EMAIL secret is not set to an email — the scan's email class has nothing to check"; exit 1 ;;
+          esac
+          # A step-local global config, so the email never becomes a later
+          # step's commit identity.
+          export GIT_CONFIG_GLOBAL="$RUNNER_TEMP/export-scan.gitconfig"
+          git config --global user.email "$email"
+          export PATH="$RUNNER_TEMP:$PATH"  # gitleaks, from the secret-scan step
+          command -v gitleaks > /dev/null || { echo "::error::gitleaks not found in \$RUNNER_TEMP — the secret-scan step must install it there"; exit 1; }
+          # Recipe parameters are positional (OUT AUTHOR PUBLIC); AUTHOR is the
+          # recipe's default, restated only to reach PUBLIC.
+          just public-export "$RUNNER_TEMP/public-export" \
+            "fakeneuron <fakeneuron@users.noreply.github.com>" ""

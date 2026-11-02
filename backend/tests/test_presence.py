@@ -3,12 +3,21 @@
 from pathlib import Path
 
 import pytest
-from test_loop import _git_repo
+from conftest import _commit, _git, _git_repo
 
 from caobunga.errors import GitUnreadable
 from caobunga.flaitron import read_project
-from caobunga.models import ExecutionTier
-from caobunga.presence import launch_pick, read_tree, tree_state
+from caobunga.git import git_head
+from caobunga.models import ExecutionTier, NewRow, Outcome, RunRecord, utc_now
+from caobunga.presence import (
+    DirtLine,
+    _is_filing,
+    launch_pick,
+    owned_ids,
+    park_hold,
+    read_tree,
+    tree_state,
+)
 
 # Two marked rows, `CBN-011` first in dispatch order. The open tasknote goes on
 # `CBN-012` — the *second* row — which is what makes the coupling observable:
@@ -44,8 +53,20 @@ COUPLING_PLAN = """# sample
 IN_PROGRESS = "---\nstatus: in-progress\n---\n"
 
 
-def _state(repo: Path, tier: ExecutionTier):
-    return read_tree(read_project(repo), repo, tier)
+def _last_run(task_id: str = "CBN-010", *filed: str) -> RunRecord:
+    """A last-run record: `task_id` dispatched, `filed` its `new_rows`."""
+    return RunRecord(
+        project="app",
+        task_id=task_id,
+        outcome=Outcome.BLOCKED,
+        closed_at=utc_now(),
+        summary="blocked",
+        new_rows=[NewRow(task_id=row) for row in filed] or None,
+    )
+
+
+def _state(repo: Path, tier: ExecutionTier, last_run: RunRecord | None = None):
+    return read_tree(read_project(repo), repo, tier, last_run=last_run)
 
 
 def test_a_clean_tree_names_the_candidate_it_is_clean_for(tmp_path: Path) -> None:
@@ -291,7 +312,7 @@ def test_a_worker_filing_is_named_but_never_exempted(tmp_path: Path) -> None:
     repo = _git_repo(tmp_path, COUPLING_PLAN)
     (repo / ".flaitron" / "PLAN.md").write_text(COUPLING_PLAN + "\n- [ ] **CBN-013**\n", "utf-8")
 
-    state = _state(repo, ExecutionTier.GATED)
+    state = _state(repo, ExecutionTier.GATED, _last_run("CBN-010", "CBN-013"))
     assert state.clean is False
     assert [entry.path for entry in state.blocking] == [".flaitron/PLAN.md"]
     assert state.filing_only is True
@@ -310,13 +331,106 @@ def test_a_sidequest_stub_is_a_filing_too(tmp_path: Path) -> None:
     stubs.mkdir(parents=True)
     (stubs / "CBN-014.md").write_text("---\nstatus: starter\n---\n", encoding="utf-8")
 
-    state = _state(repo, ExecutionTier.GATED)
+    state = _state(repo, ExecutionTier.GATED, _last_run("CBN-010", "CBN-014"))
     assert state.clean is False
     assert state.filing_only is True
     assert all(
         entry.path is not None and entry.path.startswith(".flaitron/sidequest/")
         for entry in state.blocking
     )
+
+
+def test_a_note_no_run_owns_is_not_a_filing(tmp_path: Path) -> None:
+    """A live session's in-flight note gets no commit offer (CBN-434, CBN-429 F1).
+
+    A fleet repo's `DEPLOY-061.md` matched the tasknote path shape, so the refusal
+    offered to commit another session's working note. The path still blocks; it
+    just stops reading as a filing unless the last run owns its id.
+    """
+    repo = _git_repo(tmp_path, COUPLING_PLAN)
+    (repo / ".flaitron" / "tasknote" / "DEPLOY-061.md").write_text(IN_PROGRESS, "utf-8")
+    stubs = repo / ".flaitron" / "sidequest"
+    stubs.mkdir(parents=True)
+    (stubs / "DEPLOY-062.md").write_text("---\nstatus: starter\n---\n", encoding="utf-8")
+
+    unowned = _state(repo, ExecutionTier.GATED)
+    assert len(unowned.blocking) == 2
+    assert unowned.filing_only is False
+
+    owned = _state(repo, ExecutionTier.GATED, _last_run("DEPLOY-061", "DEPLOY-062"))
+    assert owned.blocking == unowned.blocking
+    assert owned.filing_only is True
+
+
+def test_an_archived_note_is_never_a_filing_even_when_owned(tmp_path: Path) -> None:
+    """Only `<dir>/<ID>.md` names a filing; an archive path is a hand edit (CBN-434)."""
+    repo = _git_repo(tmp_path, COUPLING_PLAN)
+    archive = repo / ".flaitron" / "tasknote" / "archive" / "cbn"
+    archive.mkdir(parents=True)
+    (archive / "CBN-011.md").write_text("---\nstatus: completed\n---\n", encoding="utf-8")
+
+    state = _state(repo, ExecutionTier.GATED, _last_run("CBN-011"))
+    assert state.clean is False
+    assert state.filing_only is False
+
+
+def test_a_plan_edit_is_a_filing_only_after_a_run_that_filed_rows(tmp_path: Path) -> None:
+    """PLAN.md names a file, not an id, so the record's `new_rows` decides (CBN-435).
+
+    Path shape alone offered the commit over any PLAN edit, an operator's own
+    included. With no record, or a last run that filed nothing, the edit blocks
+    with the generic message; the blocking set never moves.
+    """
+    repo = _git_repo(tmp_path, COUPLING_PLAN)
+    (repo / ".flaitron" / "PLAN.md").write_text(COUPLING_PLAN + "\n- [ ] **CBN-013**\n", "utf-8")
+
+    no_record = _state(repo, ExecutionTier.GATED)
+    filed_nothing = _state(repo, ExecutionTier.GATED, _last_run("CBN-010"))
+    filed = _state(repo, ExecutionTier.GATED, _last_run("CBN-010", "CBN-013"))
+    assert no_record.filing_only is False
+    assert filed_nothing.filing_only is False
+    assert filed.filing_only is True
+    assert no_record.blocking == filed_nothing.blocking == filed.blocking
+
+
+def test_a_rename_into_an_owned_note_is_never_a_filing(tmp_path: Path) -> None:
+    """Its source is a path the check never classified (CBN-435).
+
+    `R  notes.md -> .flaitron/tasknote/CBN-099.md` would otherwise read as an
+    owned filing, and the path-scoped commit would leave the source behind.
+    """
+    repo = _git_repo(tmp_path, COUPLING_PLAN)
+    (repo / "notes.md").write_text(IN_PROGRESS, encoding="utf-8")
+    _commit(repo, "notes")
+    _git(repo, "mv", "notes.md", ".flaitron/tasknote/CBN-099.md")
+
+    state = _state(repo, ExecutionTier.GATED, _last_run("CBN-099"))
+    assert [entry.path for entry in state.blocking] == [".flaitron/tasknote/CBN-099.md"]
+    assert state.filing_only is False
+
+
+@pytest.mark.parametrize("status", ["UU", "AA", "DD", "R ", "C "])
+def test_unmerged_rename_and_copy_lines_are_never_filings(status: str) -> None:
+    """`add` would resolve a conflict; `commit -- <dest>` would strand a source (CBN-435)."""
+    entry = DirtLine(text=f"{status} .flaitron/PLAN.md", path=".flaitron/PLAN.md")
+    assert _is_filing(entry, frozenset(), filed=True) is False
+    plain = DirtLine(text=" M .flaitron/PLAN.md", path=".flaitron/PLAN.md")
+    assert _is_filing(plain, frozenset(), filed=True) is True
+
+
+def test_owned_ids_are_the_last_runs_task_and_its_new_rows() -> None:
+    """Read off the record, never the note: §"Fleet boundary" holds (CBN-434)."""
+    assert owned_ids(None) == frozenset()
+    run = RunRecord(
+        project="app",
+        task_id="CBN-011",
+        outcome=Outcome.BLOCKED,
+        closed_at=utc_now(),
+        summary="blocked",
+    )
+    assert owned_ids(run) == frozenset({"CBN-011"})
+    filed = run.model_copy(update={"new_rows": [NewRow(task_id="CBN-099")]})
+    assert owned_ids(filed) == frozenset({"CBN-011", "CBN-099"})
 
 
 def test_one_line_of_operator_dirt_sinks_the_whole_filing_verdict(tmp_path: Path) -> None:
@@ -372,3 +486,62 @@ def test_leftover_status_snippet_is_ordinary_dirt(tmp_path: Path) -> None:
     state = _state(repo, ExecutionTier.GATED)
     assert [entry.path for entry in state.blocking] == ["caobunga-status.md"]
     assert state.clean is False
+
+
+_HELD = "non-workflow path(s) committed since launch:"
+
+
+@pytest.mark.parametrize(
+    ("written", "held"),
+    [
+        ((".flaitron/tasknote/CBN-011.md", ".flaitron/sidequest/CBN-099.md"), None),
+        ((".flaitron/PLAN.md",), None),
+        ((".flaitron/core/SPEC.md",), f"{_HELD} .flaitron/core/SPEC.md"),
+        (("src/app.py",), f"{_HELD} src/app.py"),
+    ],
+)
+def test_park_hold_lets_only_workflow_paths_through(
+    tmp_path: Path, written: tuple[str, ...], held: str | None
+) -> None:
+    """CBN-443: a clean park is an empty tree over workflow-only commits; `core` is not one."""
+    repo = _git_repo(tmp_path, COUPLING_PLAN)
+    start = git_head(repo)
+    assert start is not None
+    for rel in written:
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text("x\n", encoding="utf-8")
+    _commit(repo, "park")
+    assert park_hold(repo, start) == held
+
+
+def test_park_hold_names_uncommitted_dirt(tmp_path: Path) -> None:
+    """CBN-443: a park left uncommitted holds the repo, whatever the dirt is."""
+    repo = _git_repo(tmp_path, COUPLING_PLAN)
+    start = git_head(repo)
+    assert start is not None
+    (repo / ".flaitron" / "tasknote" / "CBN-011.md").write_text("x\n", encoding="utf-8")
+    assert park_hold(repo, start) == "1 uncommitted change(s): ?? .flaitron/tasknote/CBN-011.md"
+
+
+def test_park_hold_sees_the_source_a_rename_left(tmp_path: Path) -> None:
+    """CBN-443 review: a source file moved into a workflow dir still names where it was."""
+    repo = _git_repo(tmp_path, COUPLING_PLAN)
+    (repo / "app.py").write_text("print('source')\n" * 20, encoding="utf-8")
+    _commit(repo, "source")
+    start = git_head(repo)
+    assert start is not None
+    _git(repo, "mv", "app.py", ".flaitron/tasknote/app.py")
+    _commit(repo, "park")
+    assert park_hold(repo, start) == f"{_HELD} app.py"
+
+
+def test_park_hold_says_how_many_paths_it_left_out(tmp_path: Path) -> None:
+    """CBN-443 review: a long source list keeps the `(+N more)` tail the other clips carry."""
+    repo = _git_repo(tmp_path, COUPLING_PLAN)
+    start = git_head(repo)
+    assert start is not None
+    for index in range(7):
+        (repo / f"src{index}.py").write_text("x\n", encoding="utf-8")
+    _commit(repo, "park")
+    shown = ", ".join(f"src{index}.py" for index in range(5))
+    assert park_hold(repo, start) == f"{_HELD} {shown} (+2 more)"

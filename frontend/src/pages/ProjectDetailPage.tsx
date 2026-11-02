@@ -3,7 +3,7 @@ import { isAxiosError } from "axios";
 import { Link, useParams } from "react-router-dom";
 
 import { fetchProject } from "../api/client";
-import type { ProjectDetail } from "../api/types";
+import type { Denial, ProjectDetail } from "../api/types";
 import {
   EnabledBadge,
   MetaRow,
@@ -72,6 +72,67 @@ function TreeBlockingDetail({
   );
 }
 
+/**
+ * One coverage denial list — reason, the row as it reads, the unparsed-blocker
+ * warning, and the seeded row (CBN-119.3, CBN-128). Extracted at CBN-440 so
+ * the `obvious` / `needs judgment` groups render the same rows; a
+ * `needs-judgment` row adds its `triage:` reason after the row text, an
+ * `obvious` one adds none — `_denial_lines`'s rule in `status_render.py`.
+ */
+function DenialList({
+  denials,
+  labelledBy,
+}: {
+  denials: Denial[];
+  labelledBy?: string;
+}) {
+  return (
+    <ul className="space-y-2 py-2" aria-labelledby={labelledBy}>
+      {denials.map((denial) => (
+        <li key={denial.task_id} className="text-sm">
+          <div>
+            {denial.line > 0 ? (
+              <span className="font-mono text-xs text-slate-500">
+                line {denial.line}{" "}
+              </span>
+            ) : null}
+            <span className="font-mono text-xs text-slate-800">
+              {denial.task_id}
+            </span>{" "}
+            <span className="text-slate-500">{denial.reason}</span>
+          </div>
+          {denial.text ? (
+            <pre className="mt-1 overflow-x-auto rounded bg-slate-50 px-2 py-1 font-mono text-xs text-slate-500">
+              {denial.text.trim()}
+            </pre>
+          ) : null}
+          {denial.triage === "needs-judgment" && denial.triage_reason ? (
+            <div className="mt-1 text-xs text-slate-500">
+              <span className="font-medium">triage:</span>{" "}
+              {denial.triage_reason}
+            </div>
+          ) : null}
+          {denial.unparsed_blocker ? (
+            <div className="mt-1 rounded bg-amber-50 px-2 py-1 text-xs text-amber-800">
+              <span className="font-medium">
+                Says &ldquo;blocked&rdquo;, but no{" "}
+                <code className="font-mono">Blocked by [[ID]]</code> clause
+                parsed — check before seeding:
+              </span>{" "}
+              <span className="font-mono">{denial.unparsed_blocker}</span>
+            </div>
+          ) : null}
+          {denial.seeded_line ? (
+            <pre className="mt-1 overflow-x-auto rounded bg-emerald-50 px-2 py-1 font-mono text-xs text-emerald-800">
+              {denial.seeded_line.trim()}
+            </pre>
+          ) : null}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export default function ProjectDetailPage() {
   const { id = "" } = useParams();
   const { data, error, isLoading } = useQuery({
@@ -101,6 +162,14 @@ export default function ProjectDetailPage() {
   const current = data.current;
   const coverage = data.coverage;
   const tree = data.tree;
+  // `format_coverage`'s grouping (CBN-157): obvious rows first, then every
+  // other denial, whatever its code, under needs judgment.
+  const obvious = (coverage?.denials ?? []).filter(
+    (d) => d.triage === "obvious",
+  );
+  const needsJudgment = (coverage?.denials ?? []).filter(
+    (d) => d.triage !== "obvious",
+  );
 
   return (
     <div className="space-y-6">
@@ -126,6 +195,9 @@ export default function ProjectDetailPage() {
           <MetaRow label="Provider">
             <OptionalText value={data.provider ?? null} />
           </MetaRow>
+          <MetaRow label="Providers">
+            <OptionalText value={data.providers?.join(", ") ?? null} />
+          </MetaRow>
           <MetaRow label="Model">
             <OptionalText value={data.model ?? null} />
           </MetaRow>
@@ -140,7 +212,7 @@ export default function ProjectDetailPage() {
           Current task
         </h2>
         {!current ? (
-          <p className="pb-2 text-sm text-slate-400">
+          <p className="pb-2 text-sm text-slate-500">
             No in-progress Flaitron task.
           </p>
         ) : (
@@ -169,7 +241,7 @@ export default function ProjectDetailPage() {
           Marker coverage
         </h2>
         {!coverage ? (
-          <p className="pb-2 text-sm text-slate-400">
+          <p className="pb-2 text-sm text-slate-500">
             Project path unreadable — no Flaitron PLAN to read.
           </p>
         ) : (
@@ -188,66 +260,73 @@ export default function ProjectDetailPage() {
                 <span className="font-mono text-xs">{coverage.unparsed}</span>
               </MetaRow>
             </dl>
+            <h3
+              id="coverage-armed"
+              className="pt-2 text-xs font-medium text-slate-700"
+            >
+              Armed queue — dispatch order
+            </h3>
+            {coverage.marked_tasks.length === 0 ? (
+              <p className="py-1 text-sm text-slate-500">None armed.</p>
+            ) : (
+              <ol
+                aria-labelledby="coverage-armed"
+                className="list-decimal py-1 pl-6"
+              >
+                {coverage.marked_tasks.map((taskId) => (
+                  <li key={taskId} className="font-mono text-xs text-slate-800">
+                    {taskId}
+                  </li>
+                ))}
+              </ol>
+            )}
             {coverage.denials.length === 0 ? (
-              <p className="py-2 text-sm text-slate-400">
+              <p className="py-2 text-sm text-slate-500">
                 No denials — every open task carries the marker.
               </p>
             ) : (
               <>
-                <p className="pt-2 text-xs text-slate-400">
+                <p className="pt-2 text-xs text-slate-500">
                   In dispatch order — seed top-down. Green is the row with{" "}
                   <code className="font-mono">[unattended]</code> placed after{" "}
                   <code className="font-mono">[model]</code> and any
                   suggestion glyph.
                 </p>
-                <ul className="space-y-2 py-2">
-                  {coverage.denials.map((denial) => (
-                    <li key={denial.task_id} className="text-sm">
-                      <div>
-                        {denial.line > 0 ? (
-                          <span className="font-mono text-xs text-slate-400">
-                            line {denial.line}{" "}
-                          </span>
-                        ) : null}
-                        <span className="font-mono text-xs text-slate-800">
-                          {denial.task_id}
-                        </span>{" "}
-                        <span className="text-slate-500">{denial.reason}</span>
-                      </div>
-                      {denial.text ? (
-                        <pre className="mt-1 overflow-x-auto rounded bg-slate-50 px-2 py-1 font-mono text-xs text-slate-500">
-                          {denial.text.trim()}
-                        </pre>
-                      ) : null}
-                      {denial.unparsed_blocker ? (
-                        <div className="mt-1 rounded bg-amber-50 px-2 py-1 text-xs text-amber-800">
-                          <span className="font-medium">
-                            Says &ldquo;blocked&rdquo;, but no{" "}
-                            <code className="font-mono">
-                              Blocked by [[ID]]
-                            </code>{" "}
-                            clause parsed — check before seeding:
-                          </span>{" "}
-                          <span className="font-mono">
-                            {denial.unparsed_blocker}
-                          </span>
-                        </div>
-                      ) : null}
-                      {denial.seeded_line ? (
-                        <pre className="mt-1 overflow-x-auto rounded bg-emerald-50 px-2 py-1 font-mono text-xs text-emerald-800">
-                          {denial.seeded_line.trim()}
-                        </pre>
-                      ) : null}
-                    </li>
-                  ))}
-                </ul>
+                {obvious.length > 0 ? (
+                  <>
+                    <h3
+                      id="coverage-obvious"
+                      className="pt-2 text-xs font-medium text-slate-700"
+                    >
+                      obvious ({obvious.length}) — mirrored predicate admits,
+                      a marker suffices
+                    </h3>
+                    <DenialList denials={obvious} labelledBy="coverage-obvious" />
+                    {needsJudgment.length > 0 ? (
+                      <>
+                        <h3
+                          id="coverage-needs-judgment"
+                          className="pt-2 text-xs font-medium text-slate-700"
+                        >
+                          needs judgment ({needsJudgment.length})
+                        </h3>
+                        <DenialList
+                          denials={needsJudgment}
+                          labelledBy="coverage-needs-judgment"
+                        />
+                      </>
+                    ) : null}
+                  </>
+                ) : (
+                  <DenialList denials={coverage.denials} />
+                )}
               </>
             )}
             {coverage.unparsed_rows.length > 0 ? (
               <ul className="space-y-1 border-t border-slate-100 py-2">
                 {coverage.unparsed_rows.map((row) => (
                   <li key={row.line} className="text-sm">
-                    <span className="font-mono text-xs text-amber-600">
+                    <span className="font-mono text-xs text-amber-700">
                       line {row.line}
                     </span>{" "}
                     <span className="text-slate-500">
@@ -269,7 +348,7 @@ export default function ProjectDetailPage() {
           Target tree
         </h2>
         {!tree ? (
-          <p className="pb-2 text-sm text-slate-400">
+          <p className="pb-2 text-sm text-slate-500">
             Project path unreadable — no target tree to read.
           </p>
         ) : !tree.readable ? (

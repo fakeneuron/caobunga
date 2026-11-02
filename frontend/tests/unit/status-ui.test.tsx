@@ -1,9 +1,10 @@
-import { cleanup, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { AxiosError } from "axios";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import FleetPage from "../../src/pages/FleetPage";
 import ProjectDetailPage from "../../src/pages/ProjectDetailPage";
+import DigestPage from "../../src/pages/DigestPage";
 import StatsPage from "../../src/pages/StatsPage";
 import FleetTable from "../../src/components/FleetTable";
 import type {
@@ -113,6 +114,8 @@ const sampleDetail: ProjectDetail = {
         text: "- [ ] **CBN-042** [medium]🧩 | glyphed — s.",
         seeded_line: "- [ ] **CBN-042** [medium]🧩 [unattended] | glyphed — s.",
         unparsed_blocker: null,
+        triage: "obvious",
+        triage_reason: null,
       },
       {
         task_id: "CBN-043",
@@ -131,6 +134,8 @@ const sampleDetail: ProjectDetail = {
         text: "- [ ] **CBN-045** [medium]🧩 | blind — Blocked on [[CBN-099]] — do not start.",
         seeded_line: "- [ ] **CBN-045** [medium]🧩 [unattended] | blind — Blocked on …",
         unparsed_blocker: "Blocked on [[CBN-099]] — do not start.",
+        triage: "needs-judgment",
+        triage_reason: "blocked — unparsed blocker mention in the description",
       },
     ],
     unparsed_rows: [
@@ -171,6 +176,8 @@ const sampleDetail: ProjectDetail = {
   reports: {
     last_rollup: "# rollup\n",
   },
+  stale_receipts: [],
+  retained_worktrees: [],
 };
 
 /** Populated fold — two invocations, one legacy record, one unset routing key. */
@@ -195,6 +202,7 @@ const sampleStats: FleetStats = {
     "waiting-user": 0,
     "worker-exited": 0,
     timeout: 1,
+    "registry-changed": 0,
   },
   throughput: [
     {
@@ -280,6 +288,7 @@ const parkedStats: FleetStats = {
     "waiting-user": 0,
     "worker-exited": 0,
     timeout: 0,
+    "registry-changed": 0,
   },
   throughput: [
     {
@@ -319,6 +328,7 @@ const emptyStats: FleetStats = {
     "waiting-user": 0,
     "worker-exited": 0,
     timeout: 0,
+    "registry-changed": 0,
   },
   throughput: [],
   routing: { provider: [], model: [], plan_model: [] },
@@ -328,13 +338,20 @@ vi.mock("../../src/api/client", () => ({
   fetchProjects: vi.fn(),
   fetchProject: vi.fn(),
   fetchStats: vi.fn(),
+  fetchDigest: vi.fn(),
 }));
 
-import { fetchProject, fetchProjects, fetchStats } from "../../src/api/client";
+import {
+  fetchDigest,
+  fetchProject,
+  fetchProjects,
+  fetchStats,
+} from "../../src/api/client";
 
 const mockedFetchProjects = vi.mocked(fetchProjects);
 const mockedFetchProject = vi.mocked(fetchProject);
 const mockedFetchStats = vi.mocked(fetchStats);
+const mockedFetchDigest = vi.mocked(fetchDigest);
 
 afterEach(() => {
   cleanup();
@@ -427,6 +444,45 @@ describe("FleetTable", () => {
     expect(screen.getAllByText("—").length).toBeGreaterThan(0);
   });
 
+  it("renders the last outcome as a badge, and a dash when there is no run", () => {
+    // CBN-441: the Outcome cell shares the detail page's chip palette instead
+    // of bare text.
+    renderWithProviders(
+      <FleetTable
+        projects={[
+          sampleProject,
+          { ...sampleProject, id: "wiki", last_run: null },
+        ]}
+      />,
+    );
+
+    const badge = screen.getByText("closed");
+    expect(badge).toHaveClass("rounded-full", "text-emerald-700");
+    expect(screen.getAllByText("—").length).toBeGreaterThan(0);
+  });
+
+  it("states the coverage and tree breakdowns in text, not title alone", () => {
+    // CBN-441: `title` is invisible to touch and unreliable for screen
+    // readers, so the breakdown also sits in an `sr-only` span.
+    renderWithProviders(
+      <FleetTable
+        projects={[
+          {
+            ...sampleProject,
+            tree: { readable: true, clean: false, blocking: 2 },
+          },
+        ]}
+      />,
+    );
+
+    const coverage = screen.getByText("1 marked, 2 denied of 3 open");
+    expect(coverage).toHaveClass("sr-only");
+    const dirty = screen.getByText(
+      ": 2 uncommitted changes would refuse the next launch",
+    );
+    expect(dirty).toHaveClass("sr-only");
+  });
+
   it("shows empty state when no projects", () => {
     renderWithProviders(<FleetTable projects={[]} />);
     expect(screen.getByText(/no registered projects/i)).toBeInTheDocument();
@@ -465,6 +521,32 @@ describe("ProjectDetailPage", () => {
     expect(screen.getAllByText("API landed.")).toHaveLength(2);
     expect(screen.queryByText("Last Hermes brief")).not.toBeInTheDocument();
     expect(screen.getByText("# rollup")).toBeInTheDocument();
+  });
+
+  it("lists the provider allow-list in the Registry panel, dash when absent", async () => {
+    // CBN-441: `providers` was on the payload type but nowhere on the page.
+    mockedFetchProject.mockResolvedValue({
+      ...sampleDetail,
+      providers: ["claude_code", "grok_cli"],
+    });
+
+    renderWithProviders(<ProjectDetailPage />, {
+      route: "/projects/webapp",
+      path: "/projects/:id",
+    });
+
+    const label = await screen.findByText("Providers");
+    expect(label.nextElementSibling).toHaveTextContent("claude_code, grok_cli");
+    cleanup();
+
+    mockedFetchProject.mockResolvedValue({ ...sampleDetail, providers: null });
+    renderWithProviders(<ProjectDetailPage />, {
+      route: "/projects/webapp",
+      path: "/projects/:id",
+    });
+
+    const bare = await screen.findByText("Providers");
+    expect(bare.nextElementSibling).toHaveTextContent("—");
   });
 
   it("names every denied task in the marker-coverage section", async () => {
@@ -590,6 +672,104 @@ describe("ProjectDetailPage", () => {
     expect(
       screen.queryByText(/\*\*CBN-043\*\*.*\[unattended\]/),
     ).not.toBeInTheDocument();
+  });
+
+  it("groups denials obvious-first, then needs judgment, as `status` does", async () => {
+    // CBN-440: `format_coverage`'s grouping — every non-obvious row, any code
+    // (CBN-043 is `blocked`, triage null), lands under needs judgment.
+    mockedFetchProject.mockResolvedValue(sampleDetail);
+
+    renderWithProviders(<ProjectDetailPage />, {
+      route: "/projects/webapp",
+      path: "/projects/:id",
+    });
+
+    const obviousList = await screen.findByRole("list", {
+      name: /^obvious \(1\)/,
+    });
+    const judgmentList = screen.getByRole("list", {
+      name: "needs judgment (2)",
+    });
+    expect(within(obviousList).getByText("CBN-042")).toBeInTheDocument();
+    expect(within(judgmentList).getByText("CBN-043")).toBeInTheDocument();
+    expect(within(judgmentList).getByText("CBN-045")).toBeInTheDocument();
+  });
+
+  it("names the triage reason on a needs-judgment row only", async () => {
+    mockedFetchProject.mockResolvedValue(sampleDetail);
+
+    renderWithProviders(<ProjectDetailPage />, {
+      route: "/projects/webapp",
+      path: "/projects/:id",
+    });
+
+    expect(
+      await screen.findByText(
+        "blocked — unparsed blocker mention in the description",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("triage:")).toHaveLength(1);
+  });
+
+  it("keeps the flat denial list when no row triages obvious", async () => {
+    // Since CBN-361 a real read never yields `obvious`, so this is the shape
+    // operators actually see; headings would claim a split that isn't there.
+    const coverage = sampleDetail.coverage!;
+    mockedFetchProject.mockResolvedValue({
+      ...sampleDetail,
+      coverage: {
+        ...coverage,
+        denials: coverage.denials.map((d) => ({
+          ...d,
+          triage: d.triage === "obvious" ? "needs-judgment" : (d.triage ?? null),
+        })),
+      },
+    });
+
+    renderWithProviders(<ProjectDetailPage />, {
+      route: "/projects/webapp",
+      path: "/projects/:id",
+    });
+
+    expect(await screen.findByText("CBN-042")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: /^obvious/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: /^needs judgment/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("lists the armed queue in dispatch order, or says none is armed", async () => {
+    const coverage = sampleDetail.coverage!;
+    mockedFetchProject.mockResolvedValue({
+      ...sampleDetail,
+      coverage: { ...coverage, marked_tasks: ["CBN-041", "CBN-039"] },
+    });
+
+    const { unmount } = renderWithProviders(<ProjectDetailPage />, {
+      route: "/projects/webapp",
+      path: "/projects/:id",
+    });
+
+    const queue = await screen.findByRole("list", {
+      name: "Armed queue — dispatch order",
+    });
+    const items = within(queue)
+      .getAllByRole("listitem")
+      .map((li) => li.textContent);
+    expect(items).toEqual(["CBN-041", "CBN-039"]);
+    unmount();
+
+    mockedFetchProject.mockResolvedValue({
+      ...sampleDetail,
+      coverage: { ...coverage, marked_tasks: [] },
+    });
+    renderWithProviders(<ProjectDetailPage />, {
+      route: "/projects/webapp",
+      path: "/projects/:id",
+    });
+    expect(await screen.findByText("None armed.")).toBeInTheDocument();
   });
 
   it("names the coupling in the target-tree section — labeled line plus counterfactual", async () => {
@@ -776,7 +956,129 @@ describe("ProjectDetailPage", () => {
 
     expect(await screen.findByText("Suite verdict")).toBeInTheDocument();
     expect(screen.getByText("red")).toBeInTheDocument();
-    expect(screen.getByText("suite: red")).toBeInTheDocument();
+    // CBN-439: the chip names the verb that went red, and the panel's verb
+    // table carries each verb's result.
+    expect(screen.getByText("suite: red (test)")).toBeInTheDocument();
+    expect(screen.getByText("Suite verbs")).toBeInTheDocument();
+    expect(screen.getByText("exit 1")).toBeInTheDocument();
+    expect(screen.getAllByText("exit 0")).toHaveLength(2);
+  });
+
+  it("renders the served run-record signals when present (CBN-439)", async () => {
+    const timedOutSuite: Suite = {
+      verdict: "timeout",
+      verbs: [
+        { verb: "test", duration: 600.4, timed_out: true, tree_changed: false },
+        {
+          verb: "lint",
+          duration: 0.2,
+          timed_out: false,
+          refused: "no-recipe",
+          tree_changed: false,
+          detail: "justfile has no lint recipe",
+        },
+        { verb: "typecheck", exit_code: 0, duration: 3.6, timed_out: false, tree_changed: false },
+      ],
+    };
+    const signalRun: RunRecord = {
+      ...lastRun,
+      hermes_review: null,
+      hermes_verdict_code: null,
+      suite: timedOutSuite,
+      external_review: "missing",
+      eligibility_reason: "marked — row carries [unattended]",
+      exhausted_providers: ["claude_code", "codex"],
+      log_path: "/Users/dev/.caobunga/logs/webapp/CBN-040.log",
+      foreign_commits: [
+        { sha: "b".repeat(40), author: "op", subject: "docs: hand edit" },
+      ],
+    };
+    mockedFetchProject.mockResolvedValue({
+      ...sampleDetail,
+      last_run: signalRun,
+      runs: [signalRun],
+    });
+
+    renderWithProviders(<ProjectDetailPage />, {
+      route: "/projects/webapp",
+      path: "/projects/:id",
+    });
+
+    expect(await screen.findByText("Suite verbs")).toBeInTheDocument();
+    // The verb table sits directly under the verdict it explains.
+    const labels = screen.getAllByRole("term").map((dt) => dt.textContent);
+    expect(labels.indexOf("Suite verbs")).toBe(labels.indexOf("Suite verdict") + 1);
+    expect(screen.getByText("timed out")).toBeInTheDocument();
+    expect(screen.getByText("refused: no-recipe")).toBeInTheDocument();
+    expect(screen.getByText("justfile has no lint recipe")).toBeInTheDocument();
+    expect(screen.getByText("10m")).toBeInTheDocument();
+    expect(screen.getByText("suite: timeout (test, lint)")).toBeInTheDocument();
+    expect(screen.getByText("External review")).toBeInTheDocument();
+    expect(screen.getByText("review: missing")).toBeInTheDocument();
+    expect(screen.getByText("marked — row carries [unattended]")).toBeInTheDocument();
+    expect(screen.getByText("claude_code, codex")).toBeInTheDocument();
+    expect(screen.getByText("/Users/dev/.caobunga/logs/webapp/CBN-040.log")).toBeInTheDocument();
+    expect(screen.getByText("Foreign commits")).toBeInTheDocument();
+    expect(screen.getByText("bbbbbbb")).toBeInTheDocument();
+    expect(screen.getByText(/docs: hand edit/)).toBeInTheDocument();
+    // A post-CBN-258 record carries no `hermes_review`: no legacy rows at all.
+    expect(screen.queryByText("Hermes review")).not.toBeInTheDocument();
+    expect(screen.queryByText("Hermes missing servers")).not.toBeInTheDocument();
+  });
+
+  it("omits the optional run-record rows when the record carries none (CBN-439)", async () => {
+    const quietRun: RunRecord = {
+      ...lastRun,
+      hermes_review: null,
+      hermes_verdict_code: null,
+      external_review: "ticked",
+    };
+    mockedFetchProject.mockResolvedValue({
+      ...sampleDetail,
+      last_run: quietRun,
+      runs: [quietRun],
+    });
+
+    renderWithProviders(<ProjectDetailPage />, {
+      route: "/projects/webapp",
+      path: "/projects/:id",
+    });
+
+    expect(await screen.findByText("External review")).toBeInTheDocument();
+    expect(screen.getByText("ticked")).toBeInTheDocument();
+    // Only `missing` earns a history chip — the digest's tag rule.
+    expect(screen.queryByText(/^review:/)).not.toBeInTheDocument();
+    for (const label of [
+      "Eligibility",
+      "Exhausted providers",
+      "Log",
+      "Foreign commits",
+      "Suite verbs",
+      "Hermes review",
+      "Hermes verdict code",
+      "Hermes verdict",
+      "Hermes missing servers",
+    ]) {
+      expect(screen.queryByText(label)).not.toBeInTheDocument();
+    }
+  });
+
+  it("expands a history summary in place", async () => {
+    mockedFetchProject.mockResolvedValue(sampleDetail);
+
+    renderWithProviders(<ProjectDetailPage />, {
+      route: "/projects/webapp",
+      path: "/projects/:id",
+    });
+
+    const summary = await screen.findByRole("button", {
+      name: "Worker exceeded the run timeout.",
+    });
+    expect(summary).toHaveAttribute("aria-expanded", "false");
+    expect(summary.className).toContain("line-clamp-2");
+    fireEvent.click(summary);
+    expect(summary).toHaveAttribute("aria-expanded", "true");
+    expect(summary.className).not.toContain("line-clamp-2");
   });
 
   it("renders a green suite chip without the red tint", async () => {
@@ -807,7 +1109,7 @@ describe("ProjectDetailPage", () => {
     });
 
     const chip = await screen.findByText("suite: green");
-    expect(chip.className).toContain("text-slate-400");
+    expect(chip.className).toContain("text-slate-500");
     expect(chip.className).not.toContain("text-rose-700");
   });
 
@@ -1098,6 +1400,7 @@ describe("StatsPage", () => {
       "worker-error",
       "waiting-user",
       "worker-exited",
+      "registry-changed",
     ]) {
       expect(screen.getByText(`${zeroed} · 0`)).toBeInTheDocument();
     }
@@ -1159,5 +1462,26 @@ describe("StatsPage", () => {
     await waitFor(() => {
       expect(screen.getByText(/network error/i)).toBeInTheDocument();
     });
+  });
+});
+
+describe("DigestPage", () => {
+  it("renders the digest markdown through the report panel", async () => {
+    mockedFetchDigest.mockResolvedValue({ markdown: "# Fleet digest\n\n- webapp" });
+
+    renderWithProviders(<DigestPage />, { route: "/digest", path: "/digest" });
+
+    expect(
+      await screen.findByRole("heading", { name: "Digest" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/# Fleet digest/)).toBeInTheDocument();
+  });
+
+  it("shows an error state when the digest fails to load", async () => {
+    mockedFetchDigest.mockRejectedValue(new Error("boom"));
+
+    renderWithProviders(<DigestPage />, { route: "/digest", path: "/digest" });
+
+    expect(await screen.findByText("boom")).toBeInTheDocument();
   });
 });

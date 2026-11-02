@@ -45,6 +45,10 @@ test-results/
 # Personal scratch
 SCRATCHPAD.md
 
-# Secrets
-.env
+# Secrets — configs/.gitignore's .env*/.dev.vars lines plus *.pem; the two examples stay indexed, as the hook spares them (docs/SECRETS.md, NAT-466.3, NAT-466.5)
+.env*
 !.env.example
+.dev.vars*
+!.dev.vars.example
+*.pem
+

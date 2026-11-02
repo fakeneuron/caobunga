@@ -35,7 +35,6 @@ from caobunga.flaitron import (
     phase_progress,
     tasknote,
 )
-from caobunga.local import CLAUDE_GUARD_SETTINGS, RECIPES, build_argv
 from caobunga.models import (
     Escalation,
     ExecutionTier,
@@ -44,11 +43,14 @@ from caobunga.models import (
     HermesVerdictCode,
     Outcome,
     RunRecord,
+    StopReason,
     SuiteVerb,
     SuiteVerdict,
     utc_now,
 )
+from caobunga.picker import PICK_ORDER
 from caobunga.prompt import worker_message
+from caobunga.recipes import CLAUDE_GUARD_SETTINGS, RECIPES, build_argv
 from caobunga.store import Store
 from caobunga.taskmap import EFFORT, MODELS, TaskClass
 from caobunga.usage import BINARIES, V1_PROVIDERS
@@ -196,13 +198,17 @@ def _argv_table_rows(header: str, label: str) -> dict[str, str]:
 # (CONTRACT §Worker interface → `local`) and is out of scope here.
 PROVIDER_SITES = (
     ("Usage adapters canonical list", r"v1 providers \(CAO tokens, stable order\):([^.]+)\."),
-    ("Picker order restatement", r"otherwise `V1_PROVIDERS` order \(([^)]*)\)"),
     ("Task-class model-map table header", r"^\| class \|(.+)\|$"),
 )
 
 BINARY_SITE = (
     "Usage adapters binaries on PATH",
     r"Binaries on PATH:([^.]+)\.",
+)
+
+PICK_ORDER_SITE = (
+    "Picker order restatement",
+    r"otherwise `picker.PICK_ORDER` \(([^)]*)\)",
 )
 
 PIN_TABLE_HEADER = (
@@ -353,6 +359,7 @@ def _error_instances() -> list[errors.UserError]:
         errors.HeadLost("boom"),
         errors.WorkerError("boom"),
         errors.ReportError("boom", record),
+        errors.ReceiptUnwritten("boom"),
     ]
 
 
@@ -373,6 +380,15 @@ def test_contract_provider_tokens_match_v1_providers(label: str, pattern: str) -
     assert tokens == EXPECTED_PROVIDERS, (
         f"{CONTRACT_PATH.name} {label} lists {tokens}, "
         f"but usage.V1_PROVIDERS is {EXPECTED_PROVIDERS}"
+    )
+
+
+def test_contract_pick_order_matches_picker() -> None:
+    label, pattern = PICK_ORDER_SITE
+    tokens = _BACKTICKED.findall(_sole_match(pattern, label))
+    expected = [provider.value for provider in PICK_ORDER]
+    assert tokens == expected, (
+        f"{CONTRACT_PATH.name} {label} lists {tokens}, but picker.PICK_ORDER is {expected}"
     )
 
 
@@ -435,7 +451,7 @@ def test_contract_local_argv_table_matches_build_argv() -> None:
     }
     assert documented == expected, (
         f"{CONTRACT_PATH.name} {label} documents {documented}, "
-        f"but local.build_argv emits {expected}"
+        f"but recipes.build_argv emits {expected}"
     )
 
 
@@ -489,12 +505,9 @@ def test_contract_run_record_enum_tables_match_models(
 
 
 DRAIN_TABLE_HEADER = "| Reason | Emitted when | Detail |"
-# The reasons are call-site literals — `_echo_drain_exit("<reason>", …)` and the
-# `(reason, detail)` tuples `_no_candidate_exit` returns — not an enum: a
-# constant only this guard read would be surface for the guard's sake.
-_DRAIN_REASON_CALL = re.compile(r'_echo_drain_exit\("(\w+)"')
-_DRAIN_REASON_RETURN = re.compile(r'return \(?\s*"(\w+)",')
-_COUNT_WORDS = {"three": 3, "four": 4, "five": 5}
+# Drain helpers return typed reasons; resolve each member to its wire value.
+_DRAIN_REASON_RETURN = re.compile(r"return \(?\s*StopReason\.(\w+),")
+_COUNT_WORDS = {"three": 3, "four": 4, "five": 5, "six": 6}
 
 
 def test_contract_drain_reasons_match_loop_exits() -> None:
@@ -507,7 +520,7 @@ def test_contract_drain_reasons_match_loop_exits() -> None:
     label = "drain reason table"
     documented = _table_first_column(DRAIN_TABLE_HEADER, label)
     source = Path(loop.__file__).read_text(encoding="utf-8")
-    emitted = set(_DRAIN_REASON_CALL.findall(source)) | set(_DRAIN_REASON_RETURN.findall(source))
+    emitted = {StopReason[member].value for member in _DRAIN_REASON_RETURN.findall(source)}
     assert set(documented) == emitted, (
         f"{CONTRACT_PATH.name} {label} lists {documented}, but loop.py emits {sorted(emitted)}"
     )
@@ -879,7 +892,7 @@ def test_contract_word_budget() -> None:
 
 
 def test_invocation_contract_fields_and_statuses_match_schema() -> None:
-    from caobunga.invocation import InvocationResult, InvocationStatus
+    from caobunga.models import InvocationResult, InvocationStatus
 
     fields = _table_first_column("| Invocation field | Meaning |", "invocation fields")
     statuses = _table_first_column("| Invocation status | Meaning |", "invocation statuses")

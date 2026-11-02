@@ -35,6 +35,7 @@ def test_protocol_covers_only_what_the_loop_calls() -> None:
         "exit_code",
         "stderr_tail",
         "stdout_tail",
+        "activity",
         "shutdown",
         "close",
     }
@@ -66,11 +67,13 @@ def test_worker_name_rejects_unknown(monkeypatch: pytest.MonkeyPatch, raw: str) 
     assert excinfo.value.exit_code == 2
 
 
-def test_select_worker_builds_the_named_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_select_worker_builds_the_named_adapter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setenv(ENV_WORKER, WORKER_LOCAL)
     # `closing`, not `with … as`: the Protocol declares `close`, not the
     # context-manager pair (same idiom as `cli.py`'s production call site).
-    with closing(select_worker()) as worker:
+    with closing(select_worker(tmp_path)) as worker:
         assert isinstance(worker, LocalWorker)
 
 

@@ -55,7 +55,7 @@ function StatsTable({ headers, children }: { headers: string[]; children: React.
 /** One local calendar day. Days with no runs are absent from the payload, not zero rows. */
 function ThroughputTable({ days }: { days: ThroughputDay[] }) {
   if (days.length === 0) {
-    return <p className="pb-2 text-sm text-slate-400">No runs recorded yet.</p>
+    return <p className="pb-2 text-sm text-slate-500">No runs recorded yet.</p>
   }
   return (
     <StatsTable headers={['Day', 'Runs', 'Outcomes']}>
@@ -79,7 +79,7 @@ function ThroughputTable({ days }: { days: ThroughputDay[] }) {
  */
 function RoutingTable({ rows }: { rows: RoutingRow[] }) {
   if (rows.length === 0) {
-    return <p className="pb-2 text-sm text-slate-400">No runs recorded yet.</p>
+    return <p className="pb-2 text-sm text-slate-500">No runs recorded yet.</p>
   }
   return (
     <StatsTable headers={['Key', 'Runs', 'Outcomes', 'Median', 'Worst', 'Counted']}>
@@ -112,7 +112,7 @@ function RoutingTable({ rows }: { rows: RoutingRow[] }) {
  * dependency, per the CBN-EPIC-12.7 gate decision this task inherits.
  *
  * Every tally the API seeds renders its full key set including zeros: five
- * outcomes, seven escalations. `null` durations and an empty-fleet
+ * outcomes, eight escalations. `null` durations and an empty-fleet
  * `success_rate` render as the dash idiom rather than `0`, matching what the
  * contract says those nulls mean — nothing counted, not nothing happened.
  */

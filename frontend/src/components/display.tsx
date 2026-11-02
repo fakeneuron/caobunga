@@ -2,7 +2,7 @@ import type { EscalationReason, Outcome } from '../api/types'
 import { formatSeconds } from '../lib/duration'
 
 function Dash() {
-  return <span className="text-slate-400">—</span>
+  return <span className="text-slate-500">—</span>
 }
 
 export function OptionalText({ value }: { value: string | null | undefined }) {
@@ -42,7 +42,7 @@ export function OutcomeBadge({ outcome, count }: { outcome: Outcome; count?: num
   return (
     <span
       className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${
-        muted ? 'bg-slate-50 text-slate-400' : OUTCOME_STYLES[outcome]
+        muted ? 'bg-slate-50 text-slate-500' : OUTCOME_STYLES[outcome]
       }`}
     >
       {count === undefined ? outcome : `${outcome} · ${count}`}
@@ -52,8 +52,8 @@ export function OutcomeBadge({ outcome, count }: { outcome: Outcome; count?: num
 
 /**
  * Escalation chip. Every escalation reason is a stop, so there is no benign
- * branch here — unlike `OutcomeBadge`, one palette covers all seven. A zero
- * count renders muted rather than hidden: `escalations` seeds all seven keys,
+ * branch here — unlike `OutcomeBadge`, one palette covers all eight. A zero
+ * count renders muted rather than hidden: `escalations` seeds all eight keys,
  * so a zero is a real answer (docs/CONTRACT.md §"Status API").
  */
 export function EscalationBadge({
@@ -67,7 +67,7 @@ export function EscalationBadge({
   return (
     <span
       className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${
-        muted ? 'bg-slate-50 text-slate-400' : 'bg-amber-50 text-amber-700'
+        muted ? 'bg-slate-50 text-slate-500' : 'bg-amber-50 text-amber-700'
       }`}
     >
       {count === undefined ? reason : `${reason} · ${count}`}

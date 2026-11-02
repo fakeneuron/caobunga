@@ -18,6 +18,7 @@ parses on either side of the trailing-token run, exactly as
 from __future__ import annotations
 
 import re
+from itertools import accumulate, pairwise
 
 # Task-level opt-in for unattended dispatch (CBN-EPIC-17.2). Lowercase, placed
 # AFTER `[model]` on the PLAN line — `TASK_LINE` captures the token run in that
@@ -42,11 +43,13 @@ HANDOFF_MARKER = "handoff"
 # the attended reads that legitimately need a tier.
 XHEAVY_TOKEN = "xheavy"  # noqa: S105
 # The frontier band: flaitron's chooser-assignable `[frontier]` rung (v6.1.0) and
-# the concrete tokens `SPEC/model.md` bands there (`fable`, `mythos`). Flaitron's
+# the concrete tokens `SPEC/model.md` bands there (`fable`, `mythos`), plus `astra`,
+# which flaitron v8.2.0's caller runner cap names beside them (CBN-448). Flaitron's
 # own automated-chooser cap is `[frontier]`; caobunga's is stricter at `[heavy]`
 # (operator decision 2026-10-11, CBN-331), so `eligibility` denies these at launch
-# beside `[xheavy]`. Ordered: the first one a row carries names the denial.
-FRONTIER_TOKENS = ("frontier", "fable", "mythos")
+# beside `[xheavy]`. Ordered: the first one a row carries names the denial. The
+# model names past `frontier` are `taskmap.FRONTIER_FAMILIES` (the runtime-id cap).
+FRONTIER_TOKENS = ("frontier", "fable", "mythos", "astra")
 EXTRA_TOKEN = re.compile(r"\[([a-z][\w.-]*)\]")
 
 TASK_ID_BODY = r"[A-Z]+(?:-EPIC)?-\d+(?:\.(?:\d+[a-z]?|N))*"
@@ -78,6 +81,11 @@ SUGGESTED_NEXT = re.compile(
 HEADING_LINE = re.compile(r"^##\s+(.+?)\s*$")
 FENCE_DELIMITER = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 HTML_COMMENT = re.compile(r"<!--[\s\S]*?-->")
+# CommonMark's code span: a backtick run closed by a run of the same length. The
+# comment walk needs this, not `CODE_SPAN`, so a ``` run with no closer stays
+# literal text instead of pairing with a later single backtick (CBN-409). An
+# escaped backtick opens no span; inside one, a backslash escapes nothing.
+RUN_CODE_SPAN = re.compile(r"(?<![`\\])(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)")
 FRONTMATTER = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 # SPEC.md §"Tasknote frontmatter" separates a `park-reason:` code from its
 # prose with ` — `. The dash class matches TASK_LINE's own tolerance above,
@@ -190,13 +198,82 @@ def _blank_code_spans(text: str) -> str:
     `parse_blocked_by` deletes them, which is right for extraction — it only
     reads the surviving text. A caller that reports *where* a mention sits needs
     offsets that still index the original, so this blanks instead. Same idiom as
-    `_blank_html_comments` over the PLAN body, for the same reason.
+    `_masked_lines` over the PLAN body, for the same reason.
     """
     return CODE_SPAN.sub(lambda match: " " * len(match.group(0)), text)
 
 
-def _blank_html_comments(markdown: str) -> str:
-    return HTML_COMMENT.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), markdown)
+# Every break `str.splitlines` splits on. Blanking keeps them, so the blanked
+# text has the same lines as the original and the walk's mask indexes both.
+_NOT_LINE_BREAK = re.compile("[^\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]")
+
+
+def _masked_lines(markdown: str) -> tuple[list[str], list[bool]]:
+    """The PLAN's lines with comments blanked, and the matching fence mask.
+
+    One walk decides both (CBN-408), so the reader never re-derives fence state
+    from text that the comment scan saw differently.
+    """
+    spans, fenced = _comment_walk(markdown)
+    return _masked_text(markdown, spans).splitlines(), fenced
+
+
+def _masked_text(markdown: str, spans: list[tuple[int, int]]) -> str:
+    pieces: list[str] = []
+    last = 0
+    for start, end in spans:
+        pieces.append(markdown[last:start])
+        pieces.append(_NOT_LINE_BREAK.sub(" ", markdown[start:end]))
+        last = end
+    pieces.append(markdown[last:])
+    return "".join(pieces)
+
+
+def _comment_walk(markdown: str) -> tuple[list[tuple[int, int]], list[bool]]:
+    """`(start, end)` offsets of each HTML comment, and the per-line fence mask.
+
+    Comments and fences are read in one pass, CommonMark's way: whichever opens
+    first holds until it closes. A ``` line inside a comment opens no fence
+    (CBN-402), and a `<!--` on any fenced line — opener, content, or closer — is
+    literal text, so an unclosed one in a fenced example cannot swallow the next
+    live comment (CBN-408). So is a `<!--` inside an inline code span (CBN-409).
+    A line that begins inside a comment is never a fence delimiter. A comment's
+    `-->` closes it wherever it falls.
+    """
+    spans: list[tuple[int, int]] = []
+    fenced: list[bool] = []
+    open_fence: str | None = None
+    covered = 0  # end offset of the last comment
+    closable = True  # False once an opener found no `-->`: none after it can close
+    bounds = pairwise(
+        accumulate((len(line) for line in markdown.splitlines(keepends=True)), initial=0)
+    )
+    for line, (line_start, line_end) in zip(markdown.splitlines(), bounds, strict=True):
+        if covered > line_start:
+            fenced.append(False)  # begins inside a comment: never a delimiter
+        else:
+            in_fence, open_fence = _fence_step(open_fence, line)
+            fenced.append(in_fence)
+            if in_fence:
+                continue
+        cursor = max(covered, line_start)
+        while closable and (opener := markdown.find("<!--", cursor, line_end)) != -1:
+            # Spans are read from `cursor`, so a backtick inside an earlier
+            # comment on this line cannot pair with one after it.
+            span = next(
+                (m for m in RUN_CODE_SPAN.finditer(markdown, cursor, line_end) if m.end() > opener),
+                None,
+            )
+            if span is not None and span.start() < opener:
+                cursor = span.end()
+                continue
+            match = HTML_COMMENT.match(markdown, opener)
+            if match is None:
+                closable = False
+                break
+            spans.append(match.span())
+            covered = cursor = match.end()
+    return spans, fenced
 
 
 def fence_mask(lines: list[str]) -> list[bool]:
@@ -210,21 +287,33 @@ def fence_mask(lines: list[str]) -> list[bool]:
     mask: list[bool] = []
     open_fence: str | None = None
     for line in lines:
-        match = FENCE_DELIMITER.match(line)
-        if open_fence is None:
-            if match is not None and not (match.group(1)[0] == "`" and "`" in match.group(2)):
-                open_fence = match.group(1)
-                mask.append(True)
-            else:
-                mask.append(False)
-            continue
-        mask.append(True)
-        closes = (
-            match is not None
-            and match.group(1)[0] == open_fence[0]
-            and len(match.group(1)) >= len(open_fence)
-            and match.group(2).strip() == ""
-        )
-        if closes:
-            open_fence = None
+        in_fence, open_fence = _fence_step(open_fence, line)
+        mask.append(in_fence)
     return mask
+
+
+def _fence_step(open_fence: str | None, line: str) -> tuple[bool, str | None]:
+    """One line of `fence_mask`'s walk: (line is fenced, fence open after it)."""
+    match = FENCE_DELIMITER.match(line)
+    if open_fence is None:
+        if match is not None and not (match.group(1)[0] == "`" and "`" in match.group(2)):
+            return True, match.group(1)
+        return False, None
+    closes = (
+        match is not None
+        and match.group(1)[0] == open_fence[0]
+        and len(match.group(1)) >= len(open_fence)
+        and match.group(2).strip() == ""
+    )
+    return True, None if closes else open_fence
+
+
+def unfenced_comments(markdown: str) -> list[str]:
+    """Inner text of each HTML comment that opens on an unfenced PLAN line.
+
+    The same spans the reader's PLAN walk blanks (CBN-115, CBN-408), so the two
+    agree on what is a comment. Unlike that walk it does not skip text above the
+    first priority heading. The epic rollup reads its range declarations from
+    these (CBN-402).
+    """
+    return [markdown[start + 4 : end - 3] for start, end in _comment_walk(markdown)[0]]

@@ -1,14 +1,17 @@
 """Read-only status API. Isolated via CAOBUNGA_HOME."""
 
+import os
 import time
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from conftest import _git
 from fastapi.testclient import TestClient
-from test_loop import _git
+from test_cli import _dead_pid, _running_receipt
 from test_store import green_suite
 
+import caobunga.invocation as invocation_module
 from caobunga.api import ENV_API_RELOAD, UI_ORIGINS, api_reload_enabled, current_task
 from caobunga.errors import UnknownProjectError, UserError
 from caobunga.flaitron import NextTask, OpenTasknote, PlanPriority, ProjectRead
@@ -21,6 +24,7 @@ from caobunga.models import (
     Outcome,
     RegistryRecord,
     RunRecord,
+    iso_z,
 )
 from caobunga.store import Store
 from main import app
@@ -307,6 +311,35 @@ def test_detail_run_history_empty_state(
     assert body["last_run"] is None
     assert body["runs"] == []
     assert body["run_counts"] == {outcome.value: 0 for outcome in Outcome}
+
+
+def test_detail_carries_stale_receipts_report_only(
+    api_client: TestClient,
+    caobunga_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CBN-444: `[]` with none; a pid-gone receipt with its landed commits, left `running`."""
+    repo = _flaitron_repo(tmp_path)
+    _register(caobunga_home, "webapp", repo)
+    assert api_client.get("/api/projects/webapp").json()["stale_receipts"] == []
+
+    store = Store(caobunga_home)
+    stale = _running_receipt(store, "webapp", _dead_pid())
+    _running_receipt(store, "webapp", os.getpid())
+    monkeypatch.setattr(invocation_module, "commits_since", lambda _root, _since: None)
+
+    [item] = api_client.get("/api/projects/webapp").json()["stale_receipts"]
+
+    assert item == {
+        "receipt_id": stale.receipt_id,
+        "task_id": None,
+        "pid": stale.pid,
+        "started_at": iso_z(stale.started_at),
+        "last_stage": "running",
+        "landed": None,
+    }
+    assert store.load_invocation(stale.receipt_id).status.value == "running"
 
 
 # CBN-106 — the fleet reads must survive one file they cannot parse. Kept in

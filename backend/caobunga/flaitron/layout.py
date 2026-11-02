@@ -32,6 +32,18 @@ CORE_REL = Path(".flaitron") / "core"
 SELF_FT_TASK_SKILL_DIR_REL = Path("claude") / "skills" / "ft-task"
 UNATTENDED_MODULE = "unattended-mode.md"
 UNATTENDED_TOKEN = "--unattended"  # noqa: S105
+# The park recipe's commit step, as `unattended-mode.md` §"The park recipe"
+# heads it since flaitron v8.1.0 (CORE-843). `park_commits` reads for it.
+PARK_COMMIT_STEP = "Lone-park commit"
+# The warning both callers print when `park_commits` answers False: a clean park
+# leaves its note uncommitted, which holds the repo on a shared tree (CBN-443).
+# Worded for both trees: an isolated park is retained on its branch instead.
+# Kept beside the probe so `register` and dispatch cannot drift apart. Warn,
+# never refuse.
+PARK_UNCOMMITTED = (
+    "{id}: flaitron pin's park does not commit its note (v8.1.0+ does); "
+    "a parked note stays uncommitted"
+)
 
 
 def _probe_skill_dir(root: Path, pinned: Path, self_layout: Path) -> Path:
@@ -85,6 +97,25 @@ def supports_unattended(root: Path) -> bool:
         return False
     skill = read_text_or_none(skill_dir / "SKILL.md")
     return skill is not None and UNATTENDED_TOKEN in skill
+
+
+def park_commits(root: Path) -> bool:
+    """Does this target's pinned `--unattended` park commit its lone note (CBN-459)?
+
+    A capability probe like `supports_unattended` (CBN-108), not a
+    `**Version:**` floor: it reads the pinned `unattended-mode.md` for the
+    recipe's commit step. A `False` here means a clean park leaves its note
+    uncommitted, and `presence.park_hold` then holds the repo — so callers
+    warn, never refuse.
+
+    Skip-not-fail: a pin without `--unattended`, or an unreadable module,
+    answers `False`. That costs a spurious warning, the cheap direction.
+    """
+    if not supports_unattended(root):
+        return False
+    skill_dir = _probe_skill_dir(root, FT_TASK_SKILL_DIR_REL, SELF_FT_TASK_SKILL_DIR_REL)
+    module = read_text_or_none(skill_dir / UNATTENDED_MODULE)
+    return module is not None and PARK_COMMIT_STEP in module
 
 
 def unattended_module_rel(root: Path) -> Path:

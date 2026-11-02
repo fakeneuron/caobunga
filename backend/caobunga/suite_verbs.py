@@ -17,8 +17,10 @@ The grant is bounded three ways, in order of authority:
    caller chooses *whether* the suite runs, never *what* runs — free
    arguments would admit `ruff --fix`, a write no command allow-list stops.
 2. **The repo must be registered.** `repo_path` is accepted only when it
-   names a registry record (`Store.find_by_path`, CBN-131's case-fold rule).
-   Anything else refuses before a subprocess exists.
+   names a registry record (`Store.find_by_path`, CBN-131's case-fold rule),
+   or the same subpath of a registered project's own `wt-<ID>` dispatch
+   worktree (`worktree.origin`, CBN-EPIC-450.3), where the pre-launch
+   baseline runs. Anything else refuses before a subprocess exists.
 3. **The tree is measured, not trusted.** `git status --porcelain -uall` is
    captured before and after, and a difference is reported on the result —
    the suite's own caches are gitignored, so a changed tree is a fact the
@@ -34,10 +36,8 @@ Tests inject `run=` and `store=`; no live `just`.
 from __future__ import annotations
 
 import contextlib
-import os
 import re
 import shutil
-import signal
 import subprocess
 import time
 from collections.abc import Callable, Sequence
@@ -46,7 +46,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from caobunga.git import git_dirt
+from caobunga.spawn import as_text, run_detached
 from caobunga.store import Store
+from caobunga.worktree import origin
 
 # Tool name → the one argv it may run, from the repo root. `just` is the
 # fleet's uniform verb layer: `test` covers every stack present (backend
@@ -70,6 +72,9 @@ TIMEOUTS: dict[str, float] = {
 # `ruff`'s findings both trail — so a chatty suite is cut from the front.
 TAIL_CHARS = 12_000
 JUSTFILE_NAMES = ("justfile", "Justfile", ".justfile")
+# The one refusal that is the machine's, not the repo's: the pre-launch
+# baseline exits 5 on it rather than skipping the repo (CBN-420).
+JUST_MISSING = "`just` is not on PATH"
 
 # just's own error when the justfile is present but the verb's recipe is not
 # (just 1.58.0: ``error: justfile does not contain recipe `typecheck` ``; the
@@ -90,10 +95,6 @@ FLEET_VERBS: tuple[str, ...] = tuple(argv[-1] for argv in VERBS.values())
 # `just --summary` (CBN-215) is read-only and near-instant; this ceiling only
 # guards a hung or interactive-prompting justfile, not a real recipe run.
 SUMMARY_TIMEOUT = 10.0
-# How long `_reap` waits for EOF / exit after the group kill (CBN-EPIC-314.2).
-# Same figure as the worker's `local.TERMINATE_GRACE`, kept local so this
-# module does not depend on the worker adapter.
-KILL_GRACE = 5.0
 
 RunFn = Callable[[Sequence[str], Path, float], tuple[int, str]]
 # Opens the caller's mutual exclusion around one verb's spawn (CBN-310).
@@ -181,15 +182,15 @@ def run_verb(
         started = time.monotonic()
         timed_out = False
         try:
-            code, output = (run or _default_run)(argv, repo, ceiling)
+            code, output = (run or run_detached)(argv, repo, ceiling)
             exit_code: int | None = code
         except subprocess.TimeoutExpired as exc:
             timed_out = True
             exit_code = None
-            output = _as_text(exc.output) + _as_text(exc.stderr)
+            output = as_text(exc.output) + as_text(exc.stderr)
         duration = time.monotonic() - started
         after, unknown_after = _porcelain(repo)
-    tail, truncated = _tail(output)
+    tail, truncated = tail_output(output)
     refused = _missing_recipe(argv[-1], exit_code, output)
     return SuiteResult(
         verb,
@@ -214,11 +215,13 @@ def _refusal(raw: Path, store: Store) -> str | None:
     if not repo.is_dir():
         return f"not a directory: {repo}"
     if store.find_by_path(repo) is None:
-        return f"not a registered caobunga project: {repo}"
+        stands_for = origin(repo)
+        if stands_for is None or store.find_by_path(stands_for) is None:
+            return f"not a registered caobunga project: {repo}"
     if not any((repo / name).is_file() for name in JUSTFILE_NAMES):
         return f"no justfile at {repo} — nothing to run"
     if shutil.which("just") is None:
-        return "`just` is not on PATH"
+        return JUST_MISSING
     return None
 
 
@@ -267,9 +270,9 @@ def probe_fitness(repo: Path, *, run: RunFn | None = None) -> FitnessResult:
     if not any((repo / name).is_file() for name in JUSTFILE_NAMES):
         return FitnessResult(fit=False, refused=f"no justfile at {repo}")
     if shutil.which("just") is None:
-        return FitnessResult(fit=False, refused="`just` is not on PATH")
+        return FitnessResult(fit=False, refused=JUST_MISSING)
     try:
-        code, output = (run or _default_run)(("just", "--summary"), repo, SUMMARY_TIMEOUT)
+        code, output = (run or run_detached)(("just", "--summary"), repo, SUMMARY_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return FitnessResult(fit=False, refused=f"`just --summary` failed: {exc}")
     if code != 0:
@@ -295,71 +298,11 @@ def _porcelain(repo: Path) -> tuple[tuple[str, ...], bool]:
     return tuple(lines), False
 
 
-def _default_run(argv: Sequence[str], cwd: Path, timeout: float) -> tuple[int, str]:
-    """Run the verb detached from the server's own stdio.
+def tail_output(output: str) -> tuple[str, bool]:
+    """The last `TAIL_CHARS` of `output`, and whether the head was dropped.
 
-    `stdin` is `DEVNULL`, never inherited: a child that reads it (`just` → bash
-    → pytest / vitest all will) would take the caller's stdin with it —
-    measured live at CBN-174, when that stdin was an MCP transport, as a server
-    silently relaunched mid-call while the abandoned call ran out its whole
-    timeout with no suite ever started.
-    `start_new_session` puts the child in its own process group so a timeout
-    kills `just`'s whole tree, not only `just`, leaving no orphaned suite to
-    collide with the next call — and so does any other exception mid-run, an
-    interrupt included (CBN-EPIC-314.2). `errors="replace"`: a suite printing
-    non-UTF-8 bytes is still a result, not a `UnicodeDecodeError`.
+    Shared with `bootstrap.run_bootstrap`, so its log clips the same way.
     """
-    proc = subprocess.Popen(  # noqa: S603
-        list(argv),
-        cwd=str(cwd),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        errors="replace",
-        start_new_session=True,
-    )
-    try:
-        output, _ = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        output = _reap(proc)
-        raise subprocess.TimeoutExpired(exc.cmd, timeout, output=output) from None
-    except BaseException:
-        _reap(proc)
-        raise
-    return proc.returncode, output
-
-
-def _reap(proc: subprocess.Popen[str]) -> str:
-    """Kill `proc`'s whole group and collect what it printed, within `KILL_GRACE`.
-
-    The drain is bounded: a grandchild that left the group (`setsid`, a daemon
-    double-fork) survives the `killpg` holding the stdout pipe open, and an
-    unbounded `communicate()` would wait on that EOF forever. On a second
-    timeout the partial output is kept and the pipe closed; the killed leader
-    is still reaped. `PermissionError` is macOS's answer for a group whose members
-    have all exited unreaped — as gone as `ProcessLookupError` (CBN-349).
-    """
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(proc.pid, signal.SIGKILL)
-    try:
-        output, _ = proc.communicate(timeout=KILL_GRACE)
-    except subprocess.TimeoutExpired as exc:
-        output = _as_text(exc.output)
-        if proc.stdout is not None:
-            proc.stdout.close()
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            proc.wait(timeout=KILL_GRACE)
-    return output or ""
-
-
-def _tail(output: str) -> tuple[str, bool]:
     if len(output) <= TAIL_CHARS:
         return output, False
     return output[-TAIL_CHARS:], True
-
-
-def _as_text(raw: str | bytes | None) -> str:
-    if raw is None:
-        return ""
-    return raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw

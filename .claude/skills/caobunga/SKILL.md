@@ -116,7 +116,7 @@ State what the tier will do before doing it:
 |---|---|
 | `observe` | Read the plan and last run record. Launches no worker. |
 | `gated` | Run **one** next task in a fresh worker session, write a run record, publish the last-run card, and stop. |
-| `proceed-on-green` | Keep running tasks while outcomes are `closed` and each close's suite is `green`. Stops on any non-`closed` outcome (`failed` / `blocked` / `de-scoped` / `no-tasknote`), and on a red / timed-out / refused suite. |
+| `proceed-on-green` | Keep running tasks while outcomes are `closed` and each close's suite is `green`, and past a park its worker committed with nothing but workflow files (CBN-443). Stops on any other non-`closed` outcome — `failed`, `de-scoped`, `no-tasknote`, a park that holds the repo — and on a red / timed-out / refused suite. |
 
 For `observe`, go straight ahead — it launches nothing.
 
@@ -149,7 +149,8 @@ Exit codes worth naming back to the operator (`docs/CONTRACT.md` §"Exit codes")
 | `2` | Usage / validation |
 | `3` | No next task — the PLAN is exhausted or nothing is eligible |
 | `4` | Worker or orchestrator failure — **escalate to the operator**; do not retry |
-| `5` | Unlaunchable — no installed or pickable provider, or `git` hung or is missing; fix this machine, not the repo |
+| `5` | Unlaunchable — no installed or pickable provider, `git` hung or is missing, or no `just` for the pre-launch baseline; fix this machine, not the repo |
+| `1` | Unexpected — **escalate to the operator** |
 
 `4` escalates. v1 has no automatic retries, and adding one here would be
 inventing policy the contract does not grant this skill. This is unchanged by

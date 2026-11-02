@@ -12,16 +12,20 @@ import {
   type ForeignCommit,
   type HermesReview,
   type HermesVerdictCode,
+  type LandingState,
   type NewRow,
   type Outcome,
   type ProjectDetail,
   type ProjectReports,
+  type RetainedWorktree,
   type RunRecord,
+  type StaleReceipt,
   type Suite,
   type SuiteVerb,
   type SuiteVerdict,
   type TriageClass,
   type UnparsedRow,
+  type WorktreeRun,
 } from "../../src/api/types";
 // Shared with backend/tests/test_api_payload_keys.py (CBN-EPIC-231.3): both
 // suites derive a key list from their own side and diff it against this file,
@@ -67,6 +71,9 @@ const PROJECT_DETAIL_KEYS = keysOf<ProjectDetail>({
   providers: true,
   registered_at: true,
   enabled: true,
+  bootstrap: true,
+  bootstrap_timeout: true,
+  isolate: true,
   last_run: true,
   current: true,
   coverage: true,
@@ -74,6 +81,8 @@ const PROJECT_DETAIL_KEYS = keysOf<ProjectDetail>({
   runs: true,
   run_counts: true,
   reports: true,
+  stale_receipts: true,
+  retained_worktrees: true,
 });
 
 const COVERAGE_DETAIL_KEYS = keysOf<ProjectDetailCoverage>({
@@ -118,6 +127,7 @@ const RUN_RECORD_KEYS = keysOf<RunRecord>({
   closed_at: true,
   escalation_reason: true,
   park_reason: true,
+  park_prose: true,
   eligibility_reason: true,
   hermes_review: true,
   hermes_verdict: true,
@@ -125,6 +135,7 @@ const RUN_RECORD_KEYS = keysOf<RunRecord>({
   hermes_missing_servers: true,
   provider: true,
   model: true,
+  effort: true,
   plan_model: true,
   invocation_id: true,
   next_task: true,
@@ -138,6 +149,7 @@ const RUN_RECORD_KEYS = keysOf<RunRecord>({
   suite: true,
   external_review: true,
   exhausted_providers: true,
+  worktree: true,
 });
 
 // Element shapes of the arrays / objects nested inside the shapes above
@@ -174,6 +186,35 @@ const FOREIGN_COMMIT_KEYS = keysOf<ForeignCommit>({
   sha: true,
   author: true,
   subject: true,
+});
+
+const STALE_RECEIPT_KEYS = keysOf<StaleReceipt>({
+  receipt_id: true,
+  task_id: true,
+  pid: true,
+  started_at: true,
+  last_stage: true,
+  landed: true,
+});
+
+const WORKTREE_RUN_KEYS = keysOf<WorktreeRun>({
+  branch: true,
+  worker_root: true,
+  execution_root: true,
+  landing_root: true,
+  base_sha: true,
+  landing: true,
+  landed_sha: true,
+  detail: true,
+});
+
+const RETAINED_WORKTREE_KEYS = keysOf<RetainedWorktree>({
+  task_id: true,
+  branch: true,
+  path: true,
+  landing: true,
+  detail: true,
+  recovery: true,
 });
 
 const SUITE_KEYS = keysOf<Suite>({
@@ -215,6 +256,7 @@ const ENUM_VALUES: [string, string[]][] = [
       "waiting-user": true,
       "worker-exited": true,
       timeout: true,
+      "registry-changed": true,
     }),
   ],
   ["hermes_review", valuesOf<HermesReview>({ reviewed: true, skipped: true, degraded: true })],
@@ -228,6 +270,7 @@ const ENUM_VALUES: [string, string[]][] = [
   ],
   ["external_review", valuesOf<ExternalReview>({ ticked: true, na: true, missing: true })],
   ["triage_class", valuesOf<TriageClass>({ obvious: true, "needs-judgment": true })],
+  ["landing_state", valuesOf<LandingState>({ landed: true, unlanded: true, retained: true })],
 ];
 
 describe("frontend/src/api/types.ts unions vs. the fixture's enum_values block", () => {
@@ -265,8 +308,11 @@ describe("frontend/src/api/types.ts vs. the checked-in payload-key fixture", () 
     ["dirt_line", DIRT_LINE_KEYS],
     ["new_row", NEW_ROW_KEYS],
     ["foreign_commit", FOREIGN_COMMIT_KEYS],
+    ["stale_receipt", STALE_RECEIPT_KEYS],
     ["suite", SUITE_KEYS],
     ["suite_verb", SUITE_VERB_KEYS],
+    ["worktree_run", WORKTREE_RUN_KEYS],
+    ["retained_worktree", RETAINED_WORKTREE_KEYS],
   ])("%s keys match the fixture", (fixtureKey, typeKeys) => {
     const declared = fixture[fixtureKey];
     if (declared === undefined) {

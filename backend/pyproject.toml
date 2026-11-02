@@ -3,14 +3,13 @@
 
 [project]
 name = "caobunga"
-version = "0.1.0"
+version = "0.3.0"
 description = "Multi-project Flaitron orchestrator"
 requires-python = ">=3.13"
 dependencies = [
     "fastapi",
     "uvicorn[standard]",
     "pydantic",
-    "httpx",
     "click>=8",
     "rich>=13",
     "watchdog>=4",
@@ -34,6 +33,7 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "pytest-cov",
+    "httpx",
 ]
 
 [tool.ruff]

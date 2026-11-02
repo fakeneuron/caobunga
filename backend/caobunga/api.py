@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 
@@ -13,8 +14,18 @@ from pydantic import BaseModel
 from caobunga.digest import format_digest
 from caobunga.errors import UnknownProjectError, UserError
 from caobunga.flaitron import Coverage, ProjectRead, try_read_project
-from caobunga.models import Escalation, Outcome, RegistryRecord, RunRecord, iso_z
+from caobunga.invocation import running_verdicts, stale_receipts
+from caobunga.models import (
+    Escalation,
+    Outcome,
+    RegistryRecord,
+    RetainedWorktree,
+    RunRecord,
+    StaleReceipt,
+    iso_z,
+)
 from caobunga.presence import DirtLine, read_tree
+from caobunga.retained import report_retained, retained_worktrees
 from caobunga.stats import fleet_stats, outcome_counts
 from caobunga.store import Store
 
@@ -101,6 +112,8 @@ class ProjectDetail(RegistryRecord):
     runs: list[RunRecord]
     run_counts: dict[Outcome, int]
     reports: ProjectReports
+    stale_receipts: list[StaleReceipt]
+    retained_worktrees: list[RetainedWorktree] | None
 
 
 class DigestResponse(BaseModel):
@@ -205,6 +218,7 @@ def tree_payload(
     record: RegistryRecord,
     *,
     detailed: bool,
+    retained: Collection[str] = (),
 ) -> dict[str, Any] | None:
     """Target-tree state, or `null` when the repo is unreadable.
 
@@ -224,10 +238,13 @@ def tree_payload(
     Unlike marker drift (§"Marker coverage"), this joins no run record — it reads
     the target repo and nothing of Caobunga's own history — so serving it here
     changes nothing about what the payload means.
+
+    `retained` is an isolated project's `wt-<ID>` leftovers (CBN-EPIC-450.6),
+    so `candidate` skips what the drain skips.
     """
     if read is None:
         return None
-    state = read_tree(read, record.path, record.tier)
+    state = read_tree(read, record.path, record.tier, retained=retained)
     payload: dict[str, Any] = {
         "readable": state.readable,
         "clean": state.clean,
@@ -271,12 +288,13 @@ def list_projects() -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     for record in store.list_projects():
         last = store.last_run(record.id)
-        read = try_read_project(Path(record.path))
+        retained = report_retained(record) or frozenset()
+        read = try_read_project(Path(record.path), retained)
         row = project_payload(record)
         row["last_run"] = last_run_summary(last) if last else None
         row["current"] = current_task(read)
         row["coverage"] = coverage_payload(read, detailed=False)
-        row["tree"] = tree_payload(read, record, detailed=False)
+        row["tree"] = tree_payload(read, record, detailed=False, retained=retained)
         rows.append(row)
     return {"projects": rows}
 
@@ -289,17 +307,26 @@ def get_project(project_id: str) -> dict[str, Any]:
     record = store.get(project_id)
     last = store.last_run(project_id)
     runs = store.list_runs(project_id)
-    read = try_read_project(Path(record.path))
+    retained = report_retained(record)
+    read = try_read_project(Path(record.path), retained or ())
     body = project_payload(record)
     body["current"] = current_task(read)
     body["coverage"] = coverage_payload(read, detailed=True)
-    body["tree"] = tree_payload(read, record, detailed=True)
+    body["tree"] = tree_payload(read, record, detailed=True, retained=retained or ())
     body["last_run"] = last.model_dump(mode="json", exclude_none=True) if last else None
     body["runs"] = run_history_payload(runs)
     body["run_counts"] = outcome_counts(runs)
     body["reports"] = {
         "last_rollup": store.last_rollup(project_id),
     }
+    body["stale_receipts"] = [
+        stale.model_dump(mode="json")
+        for stale in stale_receipts(record, running_verdicts(store, project_id))
+    ]
+    entries = retained_worktrees(record, retained, lambda: runs)
+    body["retained_worktrees"] = (
+        None if entries is None else [entry.model_dump(mode="json") for entry in entries]
+    )
     return body
 
 

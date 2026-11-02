@@ -2,59 +2,92 @@
 
 `caobunga.finish` owns the record-producing half of a run, the helpers
 `_run_gated` calls once a close is detected: the settle and suite measure
-(`settle_and_measure`), the `tree:` refresh applied after `loop` retires the
+(`settle_and_measure`, whose `measure_suite` the pre-launch baseline reuses),
+the `tree:` refresh applied after `loop` retires the
 session and re-reads the close (`refresh_tree`), and the record write with its
 `suite:` / `foreign:` / `filed:` echoes and the `report` call (`finish`). A
-leaf module: `close`, the flaitron façade, `git`, `launch`, `models`, `report`,
-`store`, `suite`, `wait`, and `worker` cross in, and nothing calls back into
+leaf module: `close`, the flaitron façade, `git`, `invocation`, `launch`, `models`,
+`report`, `store`, `suite`, `wait`, and `worker` cross in, and nothing calls back into
 `loop.py`. Split out of `loop.py` at CBN-EPIC-363.4.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from datetime import datetime
 from functools import partial
 from pathlib import Path
 
-from caobunga.close import CloseSnapshot, reinspect_settled
-from caobunga.flaitron import NextTask
-from caobunga.git import tree_after
+from caobunga.close import CloseSnapshot, diff_new_rows, reinspect_settled
+from caobunga.errors import GitUnreadable
+from caobunga.flaitron import NextTask, is_descoped, try_read_project
+from caobunga.git import git_head, tree_after
+from caobunga.invocation import InvocationTrace
 from caobunga.launch import Posture, RunDeps
 from caobunga.models import (
     CLOSURE_OUTCOMES,
+    DRAIN_TIERS,
     Escalation,
     Outcome,
     RegistryRecord,
     RunRecord,
+    WorktreeRun,
     compact_utc,
     utc_now,
 )
+from caobunga.presence import main_hold, park_hold
 from caobunga.report import report
 from caobunga.store import Store
-from caobunga.suite import echo_line
+from caobunga.suite import SuiteRun, echo_line
 from caobunga.suite import run_suite as run_fleet_suite
-from caobunga.wait import settle_worker
+from caobunga.taskmap import MODELS, resolve_effort
+from caobunga.text import read_text_or_none
+from caobunga.wait import SuiteHeartbeat, settle_worker
 from caobunga.worker import Session, Worker
+from caobunga.worktree import WorktreeContext
 
 
-def refresh_tree(snap: CloseSnapshot, root: Path, task_id: str) -> CloseSnapshot:
-    """`snap` with its trailing `tree:` line re-read; unchanged when it carries none.
+def refresh_tree(
+    snap: CloseSnapshot,
+    root: Path,
+    task_id: str,
+    *,
+    baseline: Collection[str] | None = None,
+    since: str | None = None,
+) -> CloseSnapshot:
+    """`snap` re-read once the worker has stopped.
 
-    Only the outcomes that fold `tree_after` are touched — always last, so the
-    swap is the final ` — tree: ` segment. Any other summary is free text a
-    worker wrote, which may contain that separator by chance (CBN-352).
+    The trailing `tree:` line is swapped when this outcome folds one — always
+    last, so the swap is the final ` — tree: ` segment. Any other summary is
+    free text a worker wrote, which may contain that separator by chance
+    (CBN-352). The same object comes back when nothing folded. `since` is the
+    run's start sha, passed through to `tree_after`'s footprint split (CBN-452).
+
+    A failure's `new_rows` is measured again here when `baseline` is passed
+    (CBN-436). The first measure, in `launch._failed_from_worker`, lands before
+    the settle grace, and a timeout's worker can still file during it. An
+    unreadable PLAN keeps the first measure: losing a diff already taken is the
+    worse trade. Omitting `baseline` leaves `new_rows` alone.
     """
     folds = snap.outcome in (Outcome.CLOSED, Outcome.DE_SCOPED) or snap.escalation in (
         Escalation.WORKER_EXITED,
         Escalation.TIMEOUT,
     )
-    if not folds:
+    if folds:
+        head, sep, _ = snap.summary.rpartition(" — tree: ")
+        if sep:
+            foreign = [commit.sha for commit in snap.foreign_commits or []]
+            tree = tree_after(root, task_id, since=since, foreign=foreign)
+            snap = snap.model_copy(update={"summary": f"{head} — {tree}"})
+    if snap.outcome is not Outcome.FAILED or baseline is None:
         return snap
-    head, sep, _ = snap.summary.rpartition(" — tree: ")
-    if not sep:
+    project = try_read_project(root)
+    if project is None:
         return snap
-    return snap.model_copy(update={"summary": f"{head} — {tree_after(root, task_id)}"})
+    rows = diff_new_rows(project.tasks, baseline)
+    if rows == snap.new_rows:
+        return snap
+    return snap.model_copy(update={"new_rows": rows})
 
 
 def settle_and_measure(
@@ -69,41 +102,77 @@ def settle_and_measure(
     posture: Posture,
     baseline: list[str],
     deps: RunDeps,
-) -> tuple[CloseSnapshot, str | None]:
-    # Close detection fires on the worker's commit, but the worker is
-    # still running its own post-closure git work. Let it go quiet before
-    # the report steps touch the same index (CBN-EPIC-9.5 F1).
-    settle_worker(
-        client, session, poll_interval=deps.poll_interval, sleep=deps.sleep, grace=deps.grace
-    )
-    # That work can amend the detected commit off-branch; re-read before the
-    # suite so it measures, and the record names, the final tree (CBN-275).
-    snap = reinspect_settled(
-        root,
-        task_id,
-        start_sha,
-        snap,
-        unattended=posture.unattended_pick,
-        drain=posture.drain_pick,
-        baseline=baseline,
-    )
-    # The deterministic suite (CBN-EPIC-202.3): the three fleet verbs
-    # against the tree the worker just closed, on every launching tier
-    # — only the *continue* is `proceed-on-green`'s (CBN-EPIC-202.4).
-    # After the settle, so it measures a quiet tree; only on a closure
-    # outcome, since a park or a failure left nothing closed to
-    # measure and the record model forbids the field there. The result
-    # rides the single `_write` below rather than a rewrite: `closed_at`
-    # therefore lands after the suite, which is the accepted shift
-    # (CBN-EPIC-202.1 D4) — nothing keys on it, and no pre-suite record
-    # ever exists for the v2 validator to miss.
-    if snap.outcome not in CLOSURE_OUTCOMES:
-        return snap, None
+    started: float | None = None,
+) -> tuple[CloseSnapshot, str | None, str | None]:
+    """Settle, re-read, and measure a closure: `(snap, suite log, measured HEAD)`.
+
+    The HEAD is read just before the suite starts, so an isolated landing can
+    tell whether the worker moved it during the suite (CBN-EPIC-450.4); `None`
+    when nothing was measured or git could not say. `started`, the close wait's
+    start, carries the `progress:` heartbeat through all of it (CBN-EPIC-449.5).
+    """
+    with SuiteHeartbeat(deps.echo, started) as beat:
+        # Close detection fires on the worker's commit, but the worker is
+        # still running its own post-closure git work. Let it go quiet before
+        # the report steps touch the same index (CBN-EPIC-9.5 F1).
+        settle_worker(
+            client, session, poll_interval=deps.poll_interval, sleep=deps.sleep, grace=deps.grace
+        )
+        # That work can amend the detected commit off-branch; re-read before the
+        # suite so it measures, and the record names, the final tree (CBN-275).
+        snap = reinspect_settled(
+            root,
+            task_id,
+            start_sha,
+            snap,
+            unattended=posture.unattended_pick,
+            drain=posture.drain_pick,
+            baseline=baseline,
+            retained=posture.retained,
+        )
+        # The deterministic suite (CBN-EPIC-202.3): the three fleet verbs
+        # against the tree the worker just closed, on every launching tier
+        # — only the *continue* is `proceed-on-green`'s (CBN-EPIC-202.4).
+        # After the settle, so it measures a quiet tree; only on a closure
+        # outcome, since a park or a failure left nothing closed to
+        # measure and the record model forbids the field there. The result
+        # rides the single `_write` below rather than a rewrite: `closed_at`
+        # therefore lands after the suite, which is the accepted shift
+        # (CBN-EPIC-202.1 D4) — nothing keys on it, and no pre-suite record
+        # ever exists for the v2 validator to miss.
+        if snap.outcome not in CLOSURE_OUTCOMES:
+            return snap, None, None
+        try:
+            head = git_head(root)
+        except GitUnreadable:
+            head = None
+        beat.stage = "suite"
+
+        def on_verb(verb: str) -> None:
+            beat.stage = f"suite {verb}"
+
+        measured = measure_suite(root, store, deps, on_verb=on_verb)
+        return snap.model_copy(update={"suite": measured.suite}), measured.log, head
+
+
+def measure_suite(
+    root: Path,
+    store: Store,
+    deps: RunDeps,
+    *,
+    on_verb: Callable[[str], None] | None = None,
+) -> SuiteRun:
+    """`deps.run_suite`, else the fleet suite with its `suite.lock` wait echo.
+
+    The post-close measure and the pre-launch baseline (CBN-420) share it, so
+    the two cannot disagree on what runs or how a wait is announced. `on_verb`
+    reaches only the fleet suite: an injected `deps.run_suite` names no verb.
+    """
     # A suite queued behind another slug's verb waits silently for up to the sum
     # of their ceilings while holding this run's lock, so say so (CBN-310).
     on_wait = _echo_suite_wait(deps.echo)
-    measured = (deps.run_suite or partial(run_fleet_suite, on_wait=on_wait))(root, store)
-    return snap.model_copy(update={"suite": measured.suite}), measured.log
+    fleet = partial(run_fleet_suite, on_wait=on_wait, on_verb=on_verb)
+    return (deps.run_suite or fleet)(root, store)
 
 
 def finish(
@@ -120,8 +189,11 @@ def finish(
     started_at: datetime,
     suite_log: str | None,
     deps: RunDeps,
+    trace: InvocationTrace,
+    worktree: WorktreeContext | None = None,
 ) -> RunRecord:
     echo = deps.echo
+    state = trace.settle_worktree(snap.outcome, snap.suite) if worktree is not None else None
     written = _write(
         store,
         record,
@@ -133,13 +205,44 @@ def finish(
         marked=marked,
         invocation=invocation,
         started_at=started_at,
+        worktree=state,
     )
-    deps.trace.wrote_run(written)
+    trace.wrote_run(written)
+    _record_park(trace, record, written, worktree)
     _save_suite_log(store, written, suite_log, echo)
     _echo_foreign_commits(written, echo)
     _echo_filed_commits(snap, echo)
-    report(store, record, written, echo=echo, publish=deps.publish_status)
+    parked = [park.handoff() for park in trace.result.parked]
+    report(store, record, written, echo=echo, publish=deps.publish_status, parked=parked)
     return written
+
+
+def _record_park(
+    trace: InvocationTrace,
+    record: RegistryRecord,
+    run: RunRecord,
+    worktree: WorktreeContext | None,
+) -> None:
+    """A drain's park and whether it holds the repo, decided before the card (CBN-443).
+
+    Here rather than in the loop, so the parking run's own card already names
+    the hold or the continue. The worker is stopped by now, so the tree is final.
+    A park in an isolated worktree stays on its branch, retained, and holds only
+    when main is not a tree to go on from (`main_hold`, CBN-EPIC-450.5); the
+    next read denies the parked id `retained`.
+    """
+    if run.outcome is not Outcome.BLOCKED or record.tier not in DRAIN_TIERS:
+        return
+    if trace.start_sha is None:
+        return
+    root = worktree.execution_root if worktree is not None else Path(record.path)
+    note = read_text_or_none(root / run.tasknote_path) if run.tasknote_path else None
+    held = (
+        main_hold(worktree.landing_root)
+        if worktree is not None
+        else park_hold(root, trace.start_sha)
+    )
+    trace.record_park(run, held, descoped=note is not None and is_descoped(note))
 
 
 def _write(
@@ -154,6 +257,7 @@ def _write(
     marked: list[str],
     invocation: str,
     started_at: datetime,
+    worktree: WorktreeRun | None,
 ) -> RunRecord:
     # `marked` is the **pre-flight** read's marked set, not a fresh one: it is the
     # queue state this dispatch was decided from, the same read that produced
@@ -169,6 +273,7 @@ def _write(
         closed_at=utc_now(),
         provider=provider,
         model=model,
+        effort=resolve_effort(candidate.plan_model, provider) if provider in MODELS else None,
         plan_model=candidate.plan_model,
         next_task=snap.next_task,
         tasknote_path=snap.tasknote_path,
@@ -178,12 +283,14 @@ def _write(
         log_path=snap.log_path,
         escalation_reason=snap.escalation,
         park_reason=snap.park_reason,
+        park_prose=snap.park_prose,
         eligibility_reason=candidate.eligibility_reason,
         marked_tasks=marked,
         foreign_commits=snap.foreign_commits,
         suite=snap.suite,
         external_review=snap.external_review,
         exhausted_providers=exhausted,
+        worktree=worktree,
     )
     store.write_run(run)
     return run
@@ -203,7 +310,10 @@ def _save_suite_log(
     if run.suite is None:
         return
     if log is not None:
-        store.save_suite(run.project, compact_utc(run.closed_at), run.task_id, log)
+        try:
+            store.save_suite(run.project, compact_utc(run.closed_at), run.task_id, log)
+        except OSError:
+            pass
     if echo is not None:
         echo(echo_line(run.suite))
 

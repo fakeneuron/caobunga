@@ -19,14 +19,19 @@ repo fact ("not a git repository", "no archived note"), so a hung or missing
 
 from __future__ import annotations
 
+import os
+import re
 import subprocess
+from collections.abc import Collection, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from fnmatch import fnmatchcase
 from pathlib import Path
 
 from caobunga.errors import GitUnreadable
-from caobunga.flaitron import TASKNOTE_DIR_REL
+from caobunga.flaitron import TASKNOTE_DIR_REL, tasknote_touches
 from caobunga.models import ForeignCommit
-from caobunga.text import clip
+from caobunga.text import clip, read_text_or_none
 
 GIT_TIMEOUT = 30.0
 
@@ -75,18 +80,120 @@ def git_head(root: Path) -> str | None:
     return sha or None
 
 
-def git_toplevel(root: Path) -> Path | None:
-    """The worktree root `root` sits in; `None` outside a repo or when git could not say.
+def git_run(root: Path, *args: str, timeout: float = GIT_TIMEOUT) -> str | None:
+    """`_run` for modules that issue git commands of their own (CBN-EPIC-450.2).
 
-    The run lock's repo identity (CBN-EPIC-313.6): two ids registered at nested
-    paths of one checkout share it, while a linked worktree — its own index and
-    `HEAD` — keeps its own. `_git`'s policy, so the caller falls back to the
+    Same policy: `None` on a nonzero exit, `GitUnreadable` on a hang or a
+    missing binary. One wrapper, so every caller shares the timeout and the
+    error mapping.
+    """
+    return _run(root, *args, timeout=timeout)
+
+
+@dataclass(frozen=True)
+class WorktreeEntry:
+    """One `git worktree list --porcelain` record: its path, and whether it is bare."""
+
+    path: Path
+    bare: bool
+
+
+def worktree_list(root: Path) -> list[WorktreeEntry] | None:
+    """Every worktree of `root`'s repository, the main one first (CBN-EPIC-450.2).
+
+    `None` when git answers no (not a repository). Raises `GitUnreadable` when
+    git cannot answer at all. Line-based rather than `-z` (git 2.36); a
+    worktree path holding a newline is out of scope.
+    """
+    stdout = _run(root, "worktree", "list", "--porcelain")
+    if stdout is None:
+        return None
+    entries: list[WorktreeEntry] = []
+    path: Path | None = None
+    bare = False
+    for line in [*stdout.split("\n"), ""]:
+        if not line:
+            if path is not None:
+                entries.append(WorktreeEntry(path=path, bare=bare))
+            path, bare = None, False
+        elif line.startswith("worktree "):
+            path = Path(line.removeprefix("worktree "))
+        elif line == "bare":
+            bare = True
+    return entries
+
+
+@dataclass(frozen=True)
+class RepoIdentity:
+    """Where a path sits in its repository family (CBN-EPIC-450.2).
+
+    `toplevel` is the checkout's own working-tree root and `prefix` is the
+    path below it (`""` at the root), both spelled as git spells them, so
+    neither depends on the letter case a caller registered. `main` is the
+    family's main checkout, which is `toplevel` unless `linked`; `None` for a
+    linked worktree whose `worktree list` git would not answer.
+    """
+
+    toplevel: Path
+    prefix: str
+    main: Path | None
+    linked: bool
+
+
+def repo_identity(root: Path) -> RepoIdentity | None:
+    """`root`'s place in its repository family; `None` outside a working tree.
+
+    A main checkout's `main` is its own `--show-toplevel`, which is also right
+    for a submodule or a `--separate-git-dir` checkout, whose `worktree list`
+    main entry names the git directory instead. Only a linked worktree (its git
+    dir differs from the common dir) reads `worktree list` for its main entry.
+    A bare repository has no working tree, so it is `None`. Raises
+    `GitUnreadable` when git cannot answer at all. Assumes git 2.25 or later:
+    older git prints `--git-common-dir` relative to the toplevel (before 2.13)
+    and answers `--show-toplevel` with an empty line in a bare repository
+    (before 2.25), which reads as `None` here rather than as the cwd.
+    """
+    stdout = _run(
+        root, "rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel", "--show-prefix"
+    )
+    lines = [] if stdout is None else stdout.split("\n")
+    if len(lines) < 4:
+        return None
+    git_dir, common_dir = ((root / line).resolve() for line in lines[:2])
+    if not lines[2]:
+        return None
+    toplevel, prefix = Path(lines[2]), lines[3]
+    # By file identity: git may print one of the two relative to `root`'s own
+    # spelling and the other absolute in the on-disk case.
+    if _same_file(git_dir, common_dir):
+        return RepoIdentity(toplevel=toplevel, prefix=prefix, main=toplevel, linked=False)
+    entries = worktree_list(root)
+    main = entries[0].path if entries else None
+    return RepoIdentity(toplevel=toplevel, prefix=prefix, main=main, linked=True)
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return a == b
+
+
+def main_worktree(root: Path) -> Path | None:
+    """The family's main checkout for `root`; `None` outside a repo or when git could not say.
+
+    The run lock's repo-family identity (CBN-EPIC-450.2): ids registered at the
+    main checkout, at nested paths of it, or at any of its linked worktrees all
+    share it, because a branch run in a linked worktree lands into the main
+    one. Outside a linked worktree it is `--show-toplevel`, the key
+    CBN-EPIC-313.6 used. Degrades like `_git`, so the caller falls back to the
     path it has rather than refusing a run on this read alone.
     """
-    stdout = _git(root, "rev-parse", "--show-toplevel")
-    if stdout is None or not stdout.strip():
+    try:
+        identity = repo_identity(root)
+    except GitUnreadable:
         return None
-    return Path(stdout.strip())
+    return identity.main if identity is not None else None
 
 
 def reachable_from_head(root: Path, sha: str) -> bool | None:
@@ -154,6 +261,19 @@ def commits_since(root: Path, since: datetime) -> list[str] | None:
     return [clip(line) for line in stdout.splitlines() if line]
 
 
+def commits_after(root: Path, base: str) -> list[str] | None:
+    """`<short sha> <subject>` for `base..HEAD`, newest first (CBN-EPIC-450.6).
+
+    An isolated run's own commits: its branch starts at `base`, so anything an
+    earlier task of the same drain landed on main is not counted. `None` when
+    git could not say.
+    """
+    stdout = _git(root, "log", "--format=%h %s", f"{base}..HEAD")
+    if stdout is None:
+        return None
+    return [clip(line) for line in stdout.splitlines() if line]
+
+
 def sole_path_patch(root: Path, sha: str, rel: str) -> list[str] | None:
     """`sha`'s zero-context patch lines for `rel`, when `rel` is the only path it changes.
 
@@ -167,6 +287,20 @@ def sole_path_patch(root: Path, sha: str, rel: str) -> list[str] | None:
         return None
     patch = _git(root, "show", "--format=", "--unified=0", sha, "--", rel)
     return None if patch is None else patch.splitlines()
+
+
+def changed_paths(root: Path, since: str) -> list[str] | None:
+    """Paths that differ between `since` and `HEAD`; `None` when git could not say.
+
+    `-z` so a non-ASCII path arrives unquoted (CBN-443): the caller compares
+    each path against a prefix, and a C-quoted one would match nothing.
+    `--no-renames` so a file moved into a workflow directory still names the
+    source path it left.
+    """
+    stdout = _git(root, "diff", "--name-only", "--no-renames", "-z", since, "HEAD")
+    if stdout is None:
+        return None
+    return [path for path in stdout.split("\0") if path]
 
 
 def git_dirt(root: Path, *, timeout: float = GIT_TIMEOUT) -> list[str] | None:
@@ -232,7 +366,9 @@ def git_porcelain(root: Path, *, timeout: float = GIT_TIMEOUT) -> list[str] | No
 DIRT_SAMPLE = 5
 
 
-def tree_after(root: Path, task_id: str) -> str:
+def tree_after(
+    root: Path, task_id: str, *, since: str | None = None, foreign: Collection[str] = ()
+) -> str:
     """One `tree: N file(s) left (…)` line for a run record's `summary` (CBN-171, CBN-184).
 
     Originally scoped to the `worker-exited` / `timeout` escalations: those exit
@@ -248,6 +384,16 @@ def tree_after(root: Path, task_id: str) -> str:
     `_refuse_if_dirty` echoed before CBN-287, plus whether the candidate's own
     tasknote is still open, into one report-only line. It does not change what
     the *next* invocation's dirty-tree refusal sees — that stays a fresh read.
+
+    `since` (CBN-452) is the run's start sha. With it, dirt outside the worker's
+    footprint (`worker_footprint`) moves to a trailing `K outside worker
+    footprint: …` clause. In a shared checkout that is where a concurrent
+    session's edit lands, instead of reading as the worker's. A heuristic, so
+    the clause says "outside footprint", not "foreign". Without `since`, or when
+    the footprint cannot be read, the line is the unsplit one. The clause leads
+    the parenthetical, ahead of the own-dirt sample, so a tail cut spares it
+    (CBN-457). `foreign` is the shas of the window's foreign commits
+    (`close.split_window_commits`); their paths stay out of the footprint.
     """
     lines = git_dirt(root)
     note_open = (root / TASKNOTE_DIR_REL / f"{task_id}.md").is_file()
@@ -256,9 +402,131 @@ def tree_after(root: Path, task_id: str) -> str:
         return f"tree: unreadable ({note_part})"
     if not lines:
         return f"tree: 0 file(s) left ({note_part})"
-    shown = "; ".join(line.strip() for line in lines[:DIRT_SAMPLE])
-    more = f" (+{len(lines) - DIRT_SAMPLE} more)" if len(lines) > DIRT_SAMPLE else ""
-    return f"tree: {len(lines)} file(s) left ({shown}{more}; {note_part})"
+    footprint = None if since is None else worker_footprint(root, task_id, since, foreign=foreign)
+    if footprint is None:
+        return f"tree: {len(lines)} file(s) left ({dirt_sample(lines)}; {note_part})"
+    own: list[str] = []
+    outside: list[str] = []
+    for line in lines:
+        (own if _in_footprint(_porcelain_path(line), footprint) else outside).append(line)
+    parts = [f"{len(outside)} outside worker footprint: {dirt_sample(outside)}"] if outside else []
+    if own:
+        parts.append(dirt_sample(own))
+    parts.append(note_part)
+    return f"tree: {len(lines)} file(s) left ({'; '.join(parts)})"
+
+
+# The worker's own workflow bookkeeping — a PLAN filing, a `## Completed`
+# rotation into `PLAN-ARCHIVE.md` — is attributed to it (CBN-452). Not all of
+# `.flaitron/`: a concurrent flaitron session's own tasknote lands there too.
+FOOTPRINT_ALWAYS = (".flaitron/PLAN.md", ".flaitron/PLAN-ARCHIVE.md")
+
+
+def worker_footprint(
+    root: Path, task_id: str, since: str, *, foreign: Collection[str] = ()
+) -> list[str] | None:
+    """Paths and `touches:` patterns the run's worker owns; `None` when git can't say.
+
+    The union of what the run-window commits changed, the task's `touches:`
+    (open note on disk, else the archived note at `HEAD`), the note's own path,
+    and `FOOTPRINT_ALWAYS`. The window read is `changed_paths`' net diff, or,
+    with `foreign` shas, `_own_window_paths` over the other commits, so a
+    concurrent session's later re-edit of its own file reads outside (CBN-457).
+    A note that cannot be read costs only its `touches:`, never the split
+    (CBN-452).
+    """
+    committed = (
+        changed_paths(root, since) if not foreign else _own_window_paths(root, since, foreign)
+    )
+    if committed is None:
+        return None
+    open_rel = (TASKNOTE_DIR_REL / f"{task_id}.md").as_posix()
+    text = read_text_or_none(root / open_rel)
+    archived = None
+    if text is None:
+        try:
+            archived = find_archived_tasknote_at_head(root, task_id)
+        except GitUnreadable:
+            archived = None
+        text = git_show(root, archived) if archived is not None else None
+    touches = tasknote_touches(text) if text is not None else []
+    notes = [open_rel] if archived is None else [open_rel, archived]
+    return [*FOOTPRINT_ALWAYS, *notes, *committed, *touches]
+
+
+def _own_window_paths(root: Path, since: str, foreign: Collection[str]) -> list[str] | None:
+    """Paths the `since..HEAD` commits outside `foreign` changed; `None` when git can't say.
+
+    One `diff-tree` per own commit, so a path a foreign commit shares with a
+    worker commit stays in. Same `-z` / `--no-renames` as `changed_paths`.
+    """
+    window = _git(root, "rev-list", f"{since}..HEAD")
+    if window is None:
+        return None
+    paths: list[str] = []
+    for sha in window.split():
+        if sha in foreign:
+            continue
+        stdout = _git(
+            root,
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "--no-renames",
+            "-m",
+            "-r",
+            "-z",
+            sha,
+        )
+        if stdout is None:
+            return None
+        paths.extend(path for path in stdout.split("\0") if path)
+    return paths
+
+
+def _porcelain_path(line: str) -> str:
+    """The path a `git status --porcelain` line names — a rename's destination.
+
+    Porcelain C-quotes a path with a non-ASCII byte (`"caf\\303\\251.md"`), while
+    `changed_paths` reads `-z` and gets it raw (CBN-443); unquote so both
+    sides compare the same spelling.
+    """
+    path = line[3:]
+    _, arrow, dest = path.partition(" -> ")
+    path = (dest if arrow else path).strip()
+    if len(path) >= 2 and path[0] == path[-1] == '"':
+        raw = path[1:-1].encode("ascii", "backslashreplace").decode("unicode_escape")
+        path = raw.encode("latin-1").decode("utf-8", "replace")
+    return path
+
+
+# A segment-leading `**/` (`**/x.py`, `src/**/x.py`), never one mid-token.
+_GLOBSTAR = re.compile(r"(^|/)\*\*/")
+
+
+def _in_footprint(path: str, footprint: Collection[str]) -> bool:
+    """`path` equals, sits under, or glob-matches one footprint entry.
+
+    A `touches:` entry is normalized first (CBN-457): a leading `./` goes, and
+    `**/` also matches zero directories (`fnmatchcase` has no globstar, but its
+    `*` already crosses `/`, so dropping the `**/` covers `src/x.py` for
+    `src/**/x.py` and a root `x.py` for `**/x.py`).
+    """
+    for entry in footprint:
+        entry = entry.removeprefix("./")
+        stem = entry.rstrip("/")
+        if path == stem or path.startswith(f"{stem}/"):
+            return True
+        if fnmatchcase(path, entry) or fnmatchcase(path, _GLOBSTAR.sub(r"\1", entry)):
+            return True
+    return False
+
+
+def dirt_sample(items: Sequence[str], sep: str = "; ") -> str:
+    """The first `DIRT_SAMPLE` items, stripped and joined, with a `(+N more)` tail."""
+    shown = sep.join(item.strip() for item in items[:DIRT_SAMPLE])
+    more = f" (+{len(items) - DIRT_SAMPLE} more)" if len(items) > DIRT_SAMPLE else ""
+    return f"{shown}{more}"
 
 
 def git_show(root: Path, rel_path: str, *, rev: str = "HEAD") -> str | None:

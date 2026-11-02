@@ -1,6 +1,6 @@
 import axios from 'axios'
 
-import type { FleetStats, ProjectDetail, ProjectsResponse } from './types'
+import type { DigestResponse, FleetStats, ProjectDetail, ProjectsResponse } from './types'
 
 /** Relative base — Vite dev proxy and same-origin deploy both work. */
 export const api = axios.create({
@@ -20,5 +20,10 @@ export async function fetchProject(id: string): Promise<ProjectDetail> {
 
 export async function fetchStats(): Promise<FleetStats> {
   const { data } = await api.get<FleetStats>('/api/stats')
+  return data
+}
+
+export async function fetchDigest(): Promise<DigestResponse> {
+  const { data } = await api.get<DigestResponse>('/api/digest')
   return data
 }

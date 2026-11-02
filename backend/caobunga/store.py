@@ -9,17 +9,20 @@ import os
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import yaml
 from pydantic import BaseModel, ValidationError
 
 from caobunga.errors import UnknownProjectError, UserError
-from caobunga.models import ID_PATTERN, RegistryRecord, RunRecord, compact_utc
+from caobunga.models import (
+    ID_PATTERN,
+    GlobalConfig,
+    InvocationResult,
+    RegistryRecord,
+    RunRecord,
+    compact_utc,
+)
 from caobunga.text import read_text_or_none
-
-if TYPE_CHECKING:
-    from caobunga.invocation import InvocationResult
 
 ENV_HOME = "CAOBUNGA_HOME"
 
@@ -48,6 +51,32 @@ class Store:
     def projects_dir(self) -> Path:
         return self.home / "projects"
 
+    def config_file(self) -> Path:
+        return self.home / "config.yaml"
+
+    def load_config(self) -> GlobalConfig:
+        """Fleet-wide defaults (CBN-414). Absent file → empty config.
+
+        Strict like `_load_registry`, not skip-not-fail like `_load_run`: this is
+        operator state, and silently ignoring a corrupt file would quietly widen
+        every unlisted project to every installed worker.
+        """
+        path = self.config_file()
+        if not path.is_file():
+            return GlobalConfig()
+        try:
+            raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                return GlobalConfig.model_validate(raw)
+        except (yaml.YAMLError, ValidationError):
+            pass
+        raise UserError(f"corrupt config file: {path}")
+
+    def save_config(self, config: GlobalConfig) -> GlobalConfig:
+        with self.locked():
+            self._write_yaml(self.config_file(), config)
+            return config
+
     def project_file(self, project_id: str) -> Path:
         """Registry record path for `project_id`.
 
@@ -75,21 +104,18 @@ class Store:
             return path
 
     def load_invocation(self, invocation_id: str) -> InvocationResult:
-        from caobunga.invocation import InvocationResult
-
         path = self.invocation_file(invocation_id)
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
         return InvocationResult.model_validate(raw)
 
-    def running_invocations(self, project_id: str) -> list[InvocationResult]:
+    def running_invocations(self, project_id: str | None) -> list[InvocationResult]:
         """This project's receipts still at `status: running`, oldest first (CBN-376).
 
+        `None` returns every project's, in one scan for the fleet `status` (CBN-421).
         A text prefilter skips terminal receipts before the YAML parse, since the
         directory is global and only grows. Skip-not-fail like `list_runs`: an
         unreadable receipt is not a reason to stop a run.
         """
-        from caobunga.invocation import InvocationResult
-
         directory = self.home / "invocations"
         if not directory.is_dir():
             return []
@@ -105,7 +131,7 @@ class Store:
             # A body naming another file would be rewritten there, leaving this one running.
             if path.stem != result.receipt_id:
                 continue
-            if result.project == project_id and result.status.value == "running":
+            if project_id in (None, result.project) and result.status.value == "running":
                 found.append(result)
         return found
 
@@ -154,9 +180,10 @@ class Store:
         """Lock file for the repo at `repo_path`, keyed on its identity (CBN-EPIC-313.2).
 
         `_same_repo`'s rule — resolved, case-folded — hashed to a filename, so
-        two registry ids at one repo share a lock file. `execute_run` passes the
-        record path's git toplevel (CBN-EPIC-313.6), so ids at nested paths of
-        one checkout share it too; a reader of a live lock must key the same way.
+        two registry ids at one repo share a lock file. `execute_run` passes
+        `git.main_worktree` of the record path (CBN-EPIC-450.2), so ids at nested
+        paths of one checkout or in its linked worktrees share it too; a reader of
+        a live lock must key the same way.
         """
         key = str(Path(repo_path).expanduser().resolve()).casefold()
         return self.run_locks_dir() / f"{hashlib.sha256(key.encode()).hexdigest()}.lock"
@@ -246,6 +273,28 @@ class Store:
         ]
         return sorted(records, key=lambda rec: rec.id)
 
+    def registry_digest(self) -> dict[str, str]:
+        """sha256 of each `projects/*.yaml` and `config.yaml`, keyed home-relative (CBN-424).
+
+        The loop takes one before the worker launches and one after it stops; any
+        key added, removed, or re-hashed is a registry write nobody approved during
+        the run. An unreadable file digests to a sentinel rather than raising, so
+        a vanished or locked file still shows as changed instead of crashing the run.
+        """
+        directory = self.projects_dir()
+        paths = sorted(directory.glob("*.yaml")) if directory.is_dir() else []
+        config = self.config_file()
+        if config.is_file():
+            paths.append(config)
+        digest: dict[str, str] = {}
+        for path in paths:
+            name = path.relative_to(self.home).as_posix()
+            try:
+                digest[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError:
+                digest[name] = "unreadable"
+        return digest
+
     def find_by_path(self, path: Path) -> RegistryRecord | None:
         """The registry record whose `path` names this directory, else None.
 
@@ -261,7 +310,22 @@ class Store:
                 return record
         return None
 
-    def register(self, record: RegistryRecord, *, replace: bool = False) -> RegistryRecord:
+    def register(
+        self,
+        record: RegistryRecord,
+        *,
+        replace: bool = False,
+        keep_tier: bool = False,
+        clear_providers: bool = False,
+        clear_bootstrap: bool = False,
+    ) -> RegistryRecord:
+        """Write `record`, merging into an existing one at the same path.
+
+        On a merge, `keep_tier` keeps the stored tier (re-register without
+        `--tier`, CBN-414), `clear_providers` drops the stored allow-list so
+        the record falls back to `config.yaml`, and `clear_bootstrap` drops the
+        bootstrap argv and its timeout (CBN-EPIC-450.3). A fresh write ignores all three.
+        """
         with self.locked():
             existing_path = self.project_file(record.id)
             if existing_path.is_file():
@@ -272,7 +336,13 @@ class Store:
                         "pass --replace to overwrite"
                     )
                 if _same_repo(current.path, record.path):
-                    updated = current.model_copy(update=_merge(record))
+                    updates = _merge(
+                        record,
+                        keep_tier=keep_tier,
+                        clear_providers=clear_providers,
+                        clear_bootstrap=clear_bootstrap,
+                    )
+                    updated = current.model_copy(update=updates)
                     self._write_yaml(existing_path, updated)
                     return updated
             self._write_yaml(existing_path, record)
@@ -362,10 +432,13 @@ class Store:
         return None
 
     def _load_registry(self, path: Path) -> RegistryRecord:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict):
-            raise UserError(f"corrupt registry file: {path}")
-        return RegistryRecord.model_validate(raw)
+        try:
+            raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                return RegistryRecord.model_validate(raw)
+        except (yaml.YAMLError, ValidationError):
+            pass
+        raise UserError(f"corrupt registry file: {path}")
 
     def _load_run(self, path: Path) -> RunRecord | None:
         """One run record, or `None` when the file cannot be read as one.
@@ -407,11 +480,17 @@ class Store:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = model.model_dump(mode="json", exclude_none=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
-        with tmp.open("w", encoding="utf-8") as fh:
-            yaml.safe_dump(payload, fh, sort_keys=False, allow_unicode=True)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
+        try:
+            with tmp.open("w", encoding="utf-8") as fh:
+                yaml.safe_dump(payload, fh, sort_keys=False, allow_unicode=True)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+        except BaseException:
+            # A failed write on a full disk must not hold on to the space (CBN-442).
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
+            raise
 
 
 def _same_repo(stored: str, incoming: str) -> bool:
@@ -432,16 +511,26 @@ def _same_repo(stored: str, incoming: str) -> bool:
     return stored.casefold() == incoming.casefold()
 
 
-def _merge(record: RegistryRecord) -> dict[str, object | None]:
+def _merge(
+    record: RegistryRecord, *, keep_tier: bool, clear_providers: bool, clear_bootstrap: bool
+) -> dict[str, object | None]:
     """Fields a re-register writes over an existing record at the same path.
 
     The provider pin and the allow-list are mutually exclusive, so each clears
     the other rather than merging beside it (CBN-EPIC-95.3 F0): a record holding
     both makes `picker.pick` short-circuit to the pin and silently ignore the
     allow-list. Pins move as a unit — `--provider` without `--model` drops a
-    stale model pin. An update naming neither leaves both alone.
+    stale model pin. An update naming neither leaves both alone, unless
+    `clear_providers` drops the allow-list (the pin stays).
+
+    The bootstrap argv and its timeout move as a unit too (CBN-EPIC-450.3): a
+    new argv without a timeout drops a stale one, and an update naming no argv
+    keeps both unless `clear_bootstrap` drops them. `isolate` moves only when
+    the update names it (CBN-EPIC-450.4); `None` there means "not passed".
     """
-    updates: dict[str, object | None] = {"tier": record.tier}
+    updates: dict[str, object | None] = {} if keep_tier else {"tier": record.tier}
+    if clear_providers:
+        updates["providers"] = None
     if record.provider is not None:
         updates["provider"] = record.provider
         updates["model"] = record.model
@@ -450,4 +539,12 @@ def _merge(record: RegistryRecord) -> dict[str, object | None]:
         updates["providers"] = record.providers
         updates["provider"] = None
         updates["model"] = None
+    if clear_bootstrap:
+        updates["bootstrap"] = None
+        updates["bootstrap_timeout"] = None
+    elif record.bootstrap is not None:
+        updates["bootstrap"] = record.bootstrap
+        updates["bootstrap_timeout"] = record.bootstrap_timeout
+    if record.isolate is not None:
+        updates["isolate"] = record.isolate
     return updates

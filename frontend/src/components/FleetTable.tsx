@@ -7,7 +7,7 @@ import {
 import { Link } from 'react-router-dom'
 
 import type { ProjectListItem } from '../api/types'
-import { Dash, EnabledBadge, OptionalText, TierBadge } from './display'
+import { Dash, EnabledBadge, OptionalText, OutcomeBadge, TierBadge } from './display'
 
 const columnHelper = createColumnHelper<ProjectListItem>()
 
@@ -43,14 +43,18 @@ const columns = [
       const unparsedTitle = coverage.unparsed
         ? `, ${coverage.unparsed} unparsed row${coverage.unparsed === 1 ? '' : 's'} dropped by the grammar`
         : ''
+      const breakdown = `${coverage.marked} marked, ${coverage.denied} denied of ${coverage.open} open${unparsedTitle}`
       return (
-        <span
-          className="font-mono text-xs"
-          title={`${coverage.marked} marked, ${coverage.denied} denied of ${coverage.open} open${unparsedTitle}`}
-        >
-          {coverage.marked}/{coverage.open}
+        <span className="font-mono text-xs" title={breakdown}>
+          <span className="sr-only">{breakdown}</span>
+          <span aria-hidden="true">
+            {coverage.marked}/{coverage.open}
+          </span>
           {coverage.unparsed > 0 ? (
-            <span className="text-amber-600"> ⚠{coverage.unparsed}</span>
+            <span className="text-amber-700" aria-hidden="true">
+              {' '}
+              ⚠{coverage.unparsed}
+            </span>
           ) : null}
         </span>
       )
@@ -66,20 +70,20 @@ const columns = [
       if (!tree) return <Dash />
       if (!tree.readable) {
         return (
-          <span className="font-mono text-xs text-amber-600" title="git could not report">
+          <span className="font-mono text-xs text-amber-700" title="git could not report">
             unreadable
+            <span className="sr-only">: git could not report</span>
           </span>
         )
       }
       if (tree.clean) {
         return <span className="font-mono text-xs text-slate-500">clean</span>
       }
+      const refusal = `${tree.blocking} uncommitted change${tree.blocking === 1 ? '' : 's'} would refuse the next launch`
       return (
-        <span
-          className="font-mono text-xs text-amber-600"
-          title={`${tree.blocking} uncommitted change${tree.blocking === 1 ? '' : 's'} would refuse the next launch`}
-        >
+        <span className="font-mono text-xs text-amber-700" title={refusal}>
           dirty ({tree.blocking})
+          <span className="sr-only">: {refusal}</span>
         </span>
       )
     },
@@ -107,7 +111,8 @@ const columns = [
     header: 'Outcome',
     cell: (info) => {
       const last = info.getValue()
-      return <OptionalText value={last?.outcome ?? null} />
+      if (!last) return <Dash />
+      return <OutcomeBadge outcome={last.outcome} />
     },
   }),
   columnHelper.accessor('last_run', {

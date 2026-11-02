@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from pathlib import Path
 
 from caobunga.errors import UserError
@@ -109,11 +110,17 @@ from caobunga.flaitron.grammar import (
 from caobunga.flaitron.grammar import (
     split_park_reason as split_park_reason,
 )
+from caobunga.flaitron.grammar import (
+    unfenced_comments as unfenced_comments,
+)
 from caobunga.flaitron.layout import (
     CORE_REL as CORE_REL,
 )
 from caobunga.flaitron.layout import (
     FT_TASK_SKILL_DIR_REL as FT_TASK_SKILL_DIR_REL,
+)
+from caobunga.flaitron.layout import (
+    PARK_UNCOMMITTED as PARK_UNCOMMITTED,
 )
 from caobunga.flaitron.layout import (
     PLAN_REL as PLAN_REL,
@@ -134,6 +141,9 @@ from caobunga.flaitron.layout import (
     UNATTENDED_TOKEN as UNATTENDED_TOKEN,
 )
 from caobunga.flaitron.layout import (
+    park_commits as park_commits,
+)
+from caobunga.flaitron.layout import (
     pinned_skill_rel as pinned_skill_rel,
 )
 from caobunga.flaitron.layout import (
@@ -146,25 +156,25 @@ from caobunga.flaitron.reader import (
     LAUNCH_BUCKETS as LAUNCH_BUCKETS,
 )
 from caobunga.flaitron.reader import (
-    _suggested_next,
-)
-from caobunga.flaitron.reader import (
     parse_plan as parse_plan,
 )
 from caobunga.flaitron.reader import (
     seeded_line as seeded_line,
 )
 from caobunga.flaitron.reader import (
-    unparsed_plan_rows as unparsed_plan_rows,
+    suggested_next as suggested_next,
 )
-from caobunga.flaitron.selection import (
-    _denied_rows,
+from caobunga.flaitron.reader import (
+    unparsed_plan_rows as unparsed_plan_rows,
 )
 from caobunga.flaitron.selection import (
     completed_task_ids as completed_task_ids,
 )
 from caobunga.flaitron.selection import (
     coverage as coverage,
+)
+from caobunga.flaitron.selection import (
+    denied_rows as denied_rows,
 )
 from caobunga.flaitron.selection import (
     dispatchable as dispatchable,
@@ -211,9 +221,18 @@ from caobunga.flaitron.tasknote import (
 from caobunga.flaitron.tasknote import (
     phase_progress as phase_progress,
 )
+from caobunga.flaitron.tasknote import (
+    tasknote_touches as tasknote_touches,
+)
 
 
-def read_project(root: Path, *, unattended: bool = False, drain: bool = False) -> ProjectRead:
+def read_project(
+    root: Path,
+    *,
+    unattended: bool = False,
+    drain: bool = False,
+    retained: Collection[str] = (),
+) -> ProjectRead:
     """Parse `<root>/.flaitron/PLAN.md` and open tasknotes; pick the next task.
 
     `unattended=True` applies the safety dimension (CBN-EPIC-17.2): unmarked
@@ -226,6 +245,9 @@ def read_project(root: Path, *, unattended: bool = False, drain: bool = False) -
     The `Blocked by` gate (CBN-116) applies on both postures. Its denials join
     `denied` on an unattended read — the drain echoes that list, and a skip it
     cannot explain is the silence this package refuses.
+
+    `retained` is the ids an isolated dispatch left on `wt-<ID>` branches
+    (CBN-EPIC-450.5); the pick and `denied` treat them as `retained`.
 
     A PLAN that is not UTF-8 is a `UserError`, like a missing one (CBN-323): the
     pick is never made off a lossy read, and `try_read_project` degrades it.
@@ -243,19 +265,23 @@ def read_project(root: Path, *, unattended: bool = False, drain: bool = False) -
     tasks = parse_plan(markdown)
     notes = list_open_tasknotes(repo)
     return ProjectRead(
-        suggested_next=_suggested_next(markdown),
+        suggested_next=suggested_next(markdown),
         tasks=tasks,
         open_tasknotes=notes,
-        candidate=pick_next(tasks, notes, unattended=unattended, drain=drain),
+        candidate=pick_next(tasks, notes, unattended=unattended, drain=drain, retained=retained),
         in_flight=in_flight_task(tasks, notes),
-        denied=_denied_rows(
-            tasks, unattended=unattended, completed_ids=completed_task_ids(tasks), notes=notes
+        denied=denied_rows(
+            tasks,
+            unattended=unattended,
+            completed_ids=completed_task_ids(tasks),
+            notes=notes,
+            retained=retained,
         ),
-        coverage=coverage(tasks, unparsed_plan_rows(markdown), notes),
+        coverage=coverage(tasks, unparsed_plan_rows(markdown), notes, retained=retained),
     )
 
 
-def try_read_project(root: Path) -> ProjectRead | None:
+def try_read_project(root: Path, retained: Collection[str] = ()) -> ProjectRead | None:
     """`read_project` under the skip-not-fail policy: an unreadable repo is None.
 
     The reports read every registered path on one request (§"Status API"), and a
@@ -269,8 +295,11 @@ def try_read_project(root: Path) -> ProjectRead | None:
     An `OSError` on the read (CBN-325) degrades the same way. It is caught here
     and not mapped in `read_project`: `wait.poll` treats it as transient
     (CBN-168), and a `UserError` there would turn that into an abort.
+
+    `retained` is an isolated project's `wt-<ID>` leftovers (CBN-EPIC-450.6),
+    so the report's coverage denies what the drain denies.
     """
     try:
-        return read_project(root)
+        return read_project(root, retained=retained)
     except (UserError, OSError):
         return None

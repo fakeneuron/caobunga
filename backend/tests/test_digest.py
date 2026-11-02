@@ -6,8 +6,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from test_cli import _dead_pid, _running_receipt
 from test_store import green_suite
 
+import caobunga.invocation as invocation_module
 from caobunga.digest import format_digest
 from caobunga.models import (
     CLOSURE_OUTCOMES,
@@ -482,3 +484,28 @@ def test_a_run_without_a_verdict_code_renders_exactly_as_before(tmp_path: Path) 
     assert body == (
         "# Fleet digest — 2026-08-19\n\n## app\n\n- **CBN-031** (`closed`) — Epic rollup writer.\n"
     )
+
+
+def test_digest_names_a_stale_receipt_and_what_landed_behind_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CBN-444: a dead run's commits reach the digest, whatever day it died; report-only."""
+    store = Store(tmp_path / "home")
+    _register(store, "app", tmp_path / "app")
+    _register(store, "quiet", tmp_path / "quiet")
+    stale = _running_receipt(store, "app", _dead_pid())
+    stale.task_id = "NAS-12.N"
+    store.write_invocation(stale)
+    monkeypatch.setattr(
+        invocation_module, "commits_since", lambda _root, _since: ["ebab88a feat: closed"]
+    )
+
+    body = format_digest(store, now=NOW)
+
+    app, quiet = body.split("## quiet")
+    assert (
+        f"- **stale receipt** `{stale.receipt_id}` (NAS-12.N) — pid {stale.pid} gone, since "
+    ) in app
+    assert "last stage running; landed since start: 1 commit(s) — ebab88a feat: closed" in app
+    assert quiet == "\n\n(no runs)\n"
+    assert store.load_invocation(stale.receipt_id).status.value == "running"

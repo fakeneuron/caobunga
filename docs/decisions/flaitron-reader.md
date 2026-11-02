@@ -82,7 +82,7 @@ The epic-child stem rule is checked through `epic_stem`/`epic_parent`'s numeric 
 
 The `audit` dimension was added to the same triage later (CBN-353). `eligibility` applies it only to a marked row, so triage had cleared an unmarked `.N` audit as `obvious` on clauses 1-4 alone; the CBN-351 trial then seeded a fleet repo's PID-078.N and eligibility denied it `audit — epic siblings still open (PID-078.3)`. Triage calls `_audit_sibling_gap` directly rather than re-deriving the sibling rule, so the two cannot disagree about which audit rows wait.
 
-Clause 3's keyword miss stopped counting as that mechanical fix (CBN-361, flaitron CORE-783.2). The list stays the screen and gains no visual or raster keywords. A miss is `needs-judgment` (`keyword — a miss is not a semantic pass`). The semantic decline belongs to an LLM filer and `/ft-prep-unattended`, which this reader does not run, so `status --seed` no longer lists a row on a miss alone. Per-repo `status <id>` still prints `seed:` for a `needs-judgment` row; the operator's mark is the act.
+Clause 3's keyword miss stopped counting as that mechanical fix (CBN-361, flaitron CORE-783.2). The list stays the screen and gains no visual or raster keywords. A miss is `needs-judgment` (`keyword — a miss is not a semantic pass`). The semantic decline belongs to an LLM filer and `/ft-seed-unattended`, which this reader does not run, so `status --seed` no longer lists a row on a miss alone. Per-repo `status <id>` still prints `seed:` for a `needs-judgment` row; the operator's mark is the act.
 
 ## Marker coverage — paste-ready `sed` block (CBN-157)
 
@@ -122,6 +122,10 @@ A hand-off is not a dependency (nothing upstream completes to release it) and no
 
 Before the dimension the pick still chose a parked row: every re-run wrote a `note-blocked` record in 0 s, spent a Hermes review on it, and never reached the rows behind it — measured on a fleet repo's `SCI-102` (three runs, one real) and on this repo's own CBN-252 (parked, then re-picked).
 
+## Marker coverage — `retained` dimension (CBN-EPIC-450.5)
+
+`retained` denies an id an isolated dispatch left on a `wt-<ID>` branch, worktree or directory. It sits first among the launching-tier dimensions, just ahead of `parked`: the branch may hold the only copy of the work, and nothing on main clears it. `parked` keeps its CBN-252 rationale one place lower. Resuming attended is the one fix that clears that row whatever else it carries, and, as with CBN-114's ordering, the reason itself is the discriminator. Neither carries a `seeded_line`: the row is usually already marked, and a marker is not the fix. Why it is read from git, per pick: `decisions/worker-run-loop.md` §"Run loop — isolated park and continue (CBN-EPIC-450.5)".
+
 ## Marker coverage — drift incident (CBN-120.2, CBN-125)
 
 CBN-120.2 caught marker evaporation live **twice on the same rows inside one trial** — while one fleet repo sat parked, an unrelated `CORE-EPIC-4` session rewrote the `DATA-13.4`/`.5` lines, taking a seeded cohort from **3 marked to 0** and adding already-satisfied `Blocked by` clauses in the same edit. Nothing surfaced it until the next drain refused. A marker-only test would have reported half that repo's damage and stayed silent on the stale clauses that arrived in the same rewrite, which is why the verdict is `eligibility`.
@@ -141,6 +145,11 @@ Each bump's re-verify has landed one of five outcomes:
 - **v5.33.0 — extraction, not grammar change (CBN-241).** `git -C .flaitron/core diff v5.31.0..v5.33.0 -- viz/src/parser.ts` is comment/provenance cleanup only (stripped `FE-*`/`CORE-*` inline citations, no regex or fragment-order change), matching the tag notes ("a round of comment/provenance cleanup across the visualizer"). `SPEC.md` §"Task-line format" moved its per-segment semantics into `SPEC/task-line-segments.md`, leaving the grammar block in place. `templates/tasknote-micro-template.md` is byte-identical; `templates/tasknote-template.md` only adds the Phase 3 External review and Phase 4 Learnings boxes CBN-235 already reads structurally — no heading moved. `TASK_LINE` needed no change.
 - **v7.0.0 — one glyph, `TASK_LINE` followed (CBN-330).** `git -C .flaitron/core diff v6.0.0..v7.0.0 -- viz/src/parser.ts` adds `💎` to `SUGGESTION_GLYPH` (the `[frontier]` rung's glyph, shipped upstream at v6.1.0) and otherwise touches comments only. A `[frontier]💎` row dropped to `unparsed` until `TASK_LINE`'s two glyph slots and `LEADING_SUGGESTION_GLYPH` took it. The v7 micro template also gained an `**External review:**` line in `## ⚡ Notes`, which `external_review_box` now reads (CONTRACT §"External review").
 - **v7.2.0 — byte-identical (CBN-380).** `git -C .flaitron/core diff v7.0.0..v7.2.0` is empty for `viz/src/parser.ts` and both tasknote templates. `SPEC.md` changes its `**Version:**` line and two prose paragraphs (External-review scope, post-closure rotation count), and §"Task-line format" is unchanged. `SPEC/task-line-segments.md` only adds a `/ft-prep-unattended` sentence. The pin moved after this read; `TASK_LINE` needed no change.
+- **v7.3.0 — byte-identical (CBN-406).** `git -C .flaitron/core diff v7.2.0..v7.3.0` is empty for `viz/src/parser.ts`, both tasknote templates, `SPEC/fixtures`, and `viz/`. `SPEC.md` changes only its `**Version:**` line, so §"Task-line format" is unchanged. `SPEC/task-line-segments.md` and `SPEC/plan-filing.md` only fold `/ft-prep-unattended` into `/ft-seed-unattended` in prose; the `[unattended]` segment grammar is untouched. The pin moved after this read; `TASK_LINE` needed no change.
+- **v7.4.0 — regex unchanged (CBN-415).** `git -C .flaitron/core diff v7.3.0..v7.4.0 -- viz/src/parser.ts` is comments only: the category-label comment renames `medium` to `moderate` and notes legacy `medium` is stored as written. `MODEL_TOKEN`, `TRAILING_TOKENS`, `SUGGESTION_GLYPH`, and `const TASK_LINE` are untouched, and the token class `[a-z][\w.-]*` already accepts `[moderate]`. Both tasknote templates are byte-identical. `SPEC.md` §"Task-line format" is unchanged; §"Model field" renames the ladder rung `medium` to `moderate`, records legacy `[medium]` as a read-only alias, and narrows the `frontier` trigger to a decision that is still open and hard to unwind. `SPEC/task-line-segments.md` updates the recommended label and one example row. `SPEC/fixtures` renames sample `[medium]` rows to `[moderate]` and keeps one closed `[medium]` row as the legacy alias. `SPEC/plan-parser.md` adds the legacy-token paragraph and renames the glyph's prose label. The `SPEC/plan-filing.md` diff is empty. The pin moved after this read; local `TASK_LINE` needed no change.
+- **v7.5.0 — byte-identical (CBN-417).** `git -C .flaitron/core diff v7.4.0..v7.5.0 -- viz/src/parser.ts` is empty. Both tasknote templates are byte-identical. `SPEC.md` changes only its `**Version:**` line, so §"Task-line format" is unchanged. `SPEC/task-line-segments.md`, `SPEC/plan-parser.md`, `SPEC/plan-filing.md`, `SPEC/fixtures`, and `SPEC/model.md` are absent from the range. The release notes are a `--micro` routing default, a `chore:` rule for `.flaitron/`-only closures, and a `📭 EMPTY` post-closure cue. The same tag's Also trailer (no Fable ladder cell at medium, a third refused `--unattended` park carve-out, viz advisories, dogfood re-verify) is also prose. None of it moves the task-line grammar. `viz/src/devApi.ts` changes a loopback-bind comment and does not touch `parser.ts`. The pin moved after this read; local `TASK_LINE` needed no change.
+- **v8.1.0 — comments only (CBN-445).** The range spans v8.0.0 and v8.1.0. `git -C .flaitron/core diff v7.5.0..v8.1.0 -- viz/src/parser.ts` only moves the `scanDocument` comment block below `parseTaskLine`; no regex, fragment, or `SUGGESTION_GLYPH` changed. Both tasknote templates, `SPEC/fixtures`, `SPEC/task-line-segments.md` and `SPEC/plan-parser.md` are absent from the range. `SPEC.md` changes its `**Version:**` line and the paper-complete guard (the `🚧 DIRTY` cue, and a lone `--unattended` park committing its own note); §"Task-line format" is unchanged. The audit-overlay template gained a `context`-domain sentence that `.claude/skills/audit` already states. The v8.0.0 `GET /api/active` shape change is flaitron's visualizer API, which the reader does not use. v8.1.0 ships the park commit CBN-445 proposed (CORE-843); the cue sentence it makes redundant is CBN-446's to retire. The pin moved after this read; local `TASK_LINE` needed no change.
+- **v8.2.0 — prose only.** `git -C .flaitron/core diff v8.1.0..v8.2.0` is empty for `viz/src/parser.ts`, both tasknote templates, `SPEC/fixtures`, and `SPEC/plan-parser.md`. `SPEC.md` changes its `**Version:**` line and three prose paragraphs (scope-guardrail pointer, the operator-less scope check, the `/ft-update` follow-through writes); §"Task-line format" is unchanged. `SPEC/task-line-segments.md` and `SPEC/plan-filing.md` only widen the `[unattended]` admission prose (a heavy row on a complete readiness basis; a scope starter or one bounded question as a prepare disposition); the segment grammar is untouched. The marker is still read by name, so caobunga's dispatch gates (the `[unattended]` requirement, the `[heavy]` cap, the `[xheavy]` and frontier denials) are unchanged. The pin moved after this read; local `TASK_LINE` needed no change.
 
 ## Parse contract — the guard's self-consistency limit (CBN-111)
 
@@ -201,6 +210,21 @@ Two upstream decisions land on this repo's side of the boundary, both narrower t
 
 The filing's history and its two-parser verification: §"Flaitron reader — unattended filing authority upstream (CORE-551, CBN-138.5)" above.
 
+## Flaitron reader — `[unattended]` UI rows park by construction (CBN-419)
+
+`visual-confirm` is the fleet's largest park class. On 2026-10-26 it accounted for 31 of 80 blocked run records, 27 distinct tasks across nine registered repos, between 2026-09-13 and 2026-10-20. Each of those runs parked at Phase 3's 👁️ ask. The latest seven (2026-10-16 to 2026-10-20) were examined row by row: none committed (no `commit_sha` on any record), each closed later in an attended resume, and most of those rows named their own test.
+
+The cause is a mismatch inside flaitron, not a misread here. Candidacy is judged on the **row text** (`SPEC/unattended-candidacy.md` §"Candidacy predicate"). The park is fired by the **diff**: `SPEC/gate-postures.md` §"Park conversions" parks on every 👁️ emission and refuses a tests-cover-it split, and the 👁️ box fires for any task with a rendered surface. A marked row whose work changes a rendered surface therefore parks every time, whatever its row says. Clause 3's semantic layer (a keyword miss is not a semantic pass) asks whether a row *reads* as needing a person. A row such as "guard the NaN case, add a test" does not read that way, but its diff still touches a renderer. Five of the latest seven were plain marks by `/ft-seed-unattended`, with the token added and no words reworded, so no Pin preparation was involved. Three of those five ran on a flaitron pin that already carried the semantic layer (v7.1.0+), which means it read those rows and admitted them. The other two predate it (v7.0.0 pins).
+
+The fix belongs upstream, as one clause-3 sentence: work that changes a rendered surface reads as needing a person, because the `--unattended` 👁️ conversion parks on it. That is a coherence sentence, not a new keyword, so the closed keyword list stays closed. The same filing has to keep §"Preparing declined rows" → Pin consistent with it: Pin lets a named test command stand in for a look, but under `--unattended` no test decides a rendered-surface 👁️, because the park conversion refuses that split. The operator files it from a flaitron session (CBN-419's archived Final Summary carries the row, tracked by CBN-422).
+
+Caobunga adds **no dispatch guard** (operator decision, 2026-10-26). Two candidates were rejected:
+
+- **Decline marked rows that look like UI work.** At dispatch the reader has the PLAN row and, at most, a starter. A fresh scaffold has no Acceptance to scan for 👁️ yet. Caobunga does deny some marked rows at dispatch, but only on mechanical facts: the explicit `[handoff]` token (CBN-136) and an audit's still-open siblings (CBN-309). Its triage mirror of the predicate (CONTRACT §"Marker coverage", CBN-157) deliberately leaves the semantic decline of a person-shaped row to an LLM filer and `/ft-seed-unattended` (CBN-361). Guessing "this is UI work" from a row is exactly that semantic read, turned into a dispatch gate. It would also miss a row that names no path.
+- **A visual-confirm-specific recovery hint.** The park is already visible everywhere it needs to be. The digest bullet carries `(park: visual-confirm)` and the status table `blocked (visual-confirm)` (CBN-187). `fleet` exits `4` on the parked leg (CBN-372). The recovery hint names the attended `/ft-task <ID>` resume, which spends no worker session. The status `tree:` column shows the leftover dirt, which the dirty-tree refusal holds until the operator acts.
+
+Until the upstream sentence ships, a marked UI row still costs one park and one attended resume. That is the conservative failure: the work is preserved and nothing commits unseen.
+
 ## Flaitron reader — `suggested_next` is an attended recommendation
 
 `**Suggested next task:**` is prose flaitron wrote, and flaitron's own authorship of that line consults no marker — `[unattended]` is captured grammar since v5.22.0 (`CORE-494`) but carries no meaning flaitron assigns itself — so under an unattended posture it can only ever be an *attended* recommendation. That is why the run record checks it through `dispatchable` at the run's own posture before repeating it.
@@ -220,6 +244,8 @@ A blocked row stays *inside* `open` and reports as a denial rather than shrinkin
 ## Marker coverage — parked note and the dirt gate (CBN-252)
 
 A parked row's open note is not exempted from the operator-presence dirt gate: the next worker's own `/ft-task` foreign-dirt gate would refuse an untracked sibling note anyway, and a park that left source edits (a fleet repo's `SCI-102`) *should* hold the repo until the operator resumes it. So a skipped park usually still ends the invocation — exit 3 when nothing else is marked, exit 2 on dirt otherwise — but with no worker, no record, and no review, and with the `eligibility: … deny: parked — …` line naming the resume.
+
+CBN-443 keeps the exemption out and changes what is left to refuse: the worker commits a park whose only change is its own note (CBN-443's park-check cue sentence asked for it; since CBN-446, flaitron v8.1.0's `--unattended` park recipe makes it), and a drain continues past a committed workflow-only park (`decisions/worker-run-loop.md` §"Run loop — park and continue (CBN-443)"). An uncommitted park still refuses as above, and its filing-shaped message now names the resume.
 
 ## Marker coverage — `audit` dimension (CBN-309)
 
@@ -256,3 +282,87 @@ Writing the pin down at all is what Fleet HQ's architecture requires of a consum
 ## Unattended capability probe — why not the `.claude/skills` symlink
 
 The **submodule** path is read, not the target's `.claude/skills/ft-task` symlink: "pinned" is what `.flaitron/core` holds, and a target with no skill wired at all is a larger failure than this probe answers. The flaitron-self fallback is also not that symlink — `.claude/skills` is the *wired copy* of a pin, while `claude/skills/` (no leading dot) is flaitron-self's source tree. Reading the symlink would either loop back into a missing pin or treat a local wire as the pin.
+
+## Flaitron reader — override ownership and resume rationale (CBN-411)
+
+> Extracted from CONTRACT at CBN-411. This passage preserves the explanation and its original rule context; CONTRACT is authoritative for current rules. Unlinked section references in this excerpt refer to CONTRACT.
+
+**The in-progress override is a dispatch preference, dropped only on a drain (CBN-EPIC-17.3, CBN-118).** Under `drain=True` step 1 is skipped and step 2 decides alone: a note the operator left open is *their* work. `gated` keeps it — a one-shot the operator aimed at one named repo should continue what they have open. Being a *dispatch* preference, the override is subject to every dispatch dimension including the marker: it picks among eligible rows and never exempts one, so an unmarked open note is passed over at `gated` exactly as any other unmarked row is. The `CBN-109` resume path survives the drain-side drop without a special case ([decisions/flaitron-reader.md](flaitron-reader.md) §"Flaitron reader — resume survives the drain-side drop (CBN-109)").
+
+## Flaitron reader — independent current-task display (CBN-411)
+
+> Extracted from CONTRACT at CBN-411. This passage preserves the explanation and its original rule context; CONTRACT is authoritative for current rules. Unlinked section references in this excerpt refer to CONTRACT.
+
+**`in_flight` is the override's display half**, split onto its own `ProjectRead` field by the same task. It answers "what is open right now" (step 1, always attended eligibility) rather than "what would be dispatched next", is computed on **every** read and every posture, and is what §"Status API" serves as `current`. Splitting it is what stops a change to the picker's dispatch preference from silently blanking the dashboard (CBN-040, from CBN-011: this is the only durable current-task signal).
+
+## Flaitron reader — stale blockers require clause removal (CBN-411)
+
+> Extracted from CONTRACT at CBN-411. This passage preserves the explanation and its original rule context; CONTRACT is authoritative for current rules. Unlinked section references in this excerpt refer to CONTRACT.
+
+`SPEC/blocked.md` makes *clause removal* the act that clears the gate ("the task re-enters when the blocker clears — remove the `Blocked by` clause"), so a clause whose blockers are all already checked **still denies** rather than auto-releasing: dispatching a row whose PLAN line literally reads "Blocked by" would be the orchestrator overruling the operator's own text. It is reported as stale — `blocked — Blocked by [[CBN-115]] (completed; clause is stale, remove it)` — because the fix is a one-line PLAN edit and the operator should not have to diff two rows to find it. A blocker id absent from PLAN cannot be *confirmed* complete and so reads as still-blocking, the same bias-to-refuse the marker dimension applies.
+
+## Parse contract — polling race and unreadable-git rationale (CBN-411)
+
+> Extracted from CONTRACT at CBN-411. This passage preserves the explanation and its original rule context; CONTRACT is authoritative for current rules. Unlinked section references in this excerpt refer to CONTRACT.
+
+**The file can vanish, not just its frontmatter (CBN-168).** The watch loop globs `tasknote/` and reads each hit, and a closing worker's `git mv` into `archive/` lands between the two exactly when the watchdog wakes on that event. That is a transient state, not a malformed note, and it is answered the same way: the read returns *no* open status, the note drops out of *this* poll, and the next poll sees the archive. The same rule holds one level up — `wait_for_close` treats an `OSError` out of `inspect_close` (the PLAN's own `is_file()` → `read_text` gap included) as "not closed yet" rather than a verdict, so no poll ever ends the run over filesystem timing; a persistent problem still surfaces as `worker-exited` / `timeout`. `UserError` is not caught there: a PLAN missing at `is_file()` time remains the registration error CONTRACT names. Its one exception is `GitUnreadable` (CBN-269) — a `git` read that hung past `GIT_TIMEOUT` or found no binary — which is transient on the same terms and escalates the same way; outside the poll (the pre-launch `HEAD` read and the operator-presence dirt read, CBN-317) it refuses exit 5 as `git unreadable in …`, distinct from `not a git repository`. What the race cost before the fix: [decisions/flaitron-reader.md](flaitron-reader.md) §"Parse contract — vanished-file race (CBN-168)".
+
+## Parse contract — trailing-token read rationale (CBN-411)
+
+> Extracted from CONTRACT at CBN-411. This passage preserves the explanation and its original rule context; CONTRACT is authoritative for current rules. Unlinked section references in this excerpt refer to CONTRACT.
+
+**A second read of the trailing-token run needs no grammar move (CBN-136).** `TASK_LINE`'s group 5 — `((?:\s+\[[a-z][\w.-]*\])*)` — captures every trailing bracket token, and `EXTRA_TOKEN.findall` returns them all; `unattended` is picked out of that list *by name*. `[handoff]` joins it with one added membership test and no regex change. **Caobunga reads the token permanently unratified ([[CBN-137]])**, which costs nothing while flaitron documents trailing bracket tokens as tolerated and dropped (except `[unattended]`). The token carries the same two placement footguns `[unattended]` does: written before (or without) `[model]` it is captured *as* the model, and `[!handoff]` matches no slot — which drops the whole line for *this* reader, while flaitron's own parser surfaces it in `parsePlanWithDiagnostics`'s `unparsed`. Why the upstream reservation was De-scoped rather than filed: [decisions/flaitron-reader.md](flaitron-reader.md) §"Parse contract — `[handoff]` stays unratified (CBN-136, CBN-137)".
+
+## Marker coverage — worklist invariant rationale (CBN-411)
+
+> Extracted from CONTRACT at CBN-411; CONTRACT remains authoritative for current rules. Unlinked section references in this excerpt refer to CONTRACT.
+
+- **The detail form is a seeding worklist, not a list of ids (CBN-119.3).** Each `Denial` carries the 1-based PLAN `line`, the row's raw `text`, and — when a marker is the fix — a `seeded_line`: the same row with `[unattended]` placed after `[model]` and **after any suggestion glyph** — flaitron's own placement (`[light]🔧 [unattended]`, `SPEC/unattended-candidacy.md` §"Three postures"; CBN-343) and the one shape emitted, even though `TASK_LINE` accepts either side since `CBN-167`. The one exception is a glyph after a stacked-`[model]` run (`[sonnet] [light]🔧`): no token may follow that glyph slot, here or upstream, so the marker lands before it. **The suggestion is verified by re-parsing it, never by trusting the insertion** — `seeded_line` is emitted only when the rebuilt row parses back to the same id and reads as marked, so a modelless row yields `None` and a hand edit rather than a broken suggestion. `None` is also what a `blocked`, `exploratory`, or `frontier` denial gets: seeding does not fix any of them. **`denials` is ordered by the picker's own `_selection_key`, so the list *is* the seeding order** — seed the first entry and it is the row that dispatches next. `read_project`'s posture-dependent `denied` is built by the same `_denial` constructor and sorted the same way. Detail surfaces only; the fleet table keeps its `marked/open` cell (§"Status API"). `caobunga status <id>` elides both rows to 96 characters, the tail cut so the head's placement stays visible. The placement measurement, the modelless failure, and the ordering and elision reasoning: [decisions/flaitron-reader.md](flaitron-reader.md) §"Marker coverage — seeding worklist shape (CBN-119.3, CBN-167)".
+
+## Flaitron reader — layout hard-cut history (CBN-460)
+
+Context relocated from CONTRACT; current rules remain there. Unlinked section references and positional wording refer to the original CONTRACT context.
+
+**`.flaitron/` is a hard cut (CBN-278).** Flaitron v6.0.0 renamed flowtron's `.flowtron/` tree and its `.flowtron/core` submodule, with no old-name fallback upstream, and the reader follows it: every target-layout path lives in `flaitron/layout.py` and roots at `.flaitron`, with no second root to fall back to. A target still on `.flowtron/` reads as a missing PLAN (exit 2, below) until flaitron's fleet wave (CORE-711.7) migrates it. Caobunga's own checkout and its guard tests moved to `.flaitron/core` in that wave.
+
+## Unattended capability probe — retired filing-probe history (CBN-460)
+
+Context relocated from CONTRACT; current rules remain there. Unlinked section references and positional wording refer to the original CONTRACT context.
+
+**The filing probe is retired (CBN-330).** It answered whether the pin's filing skill accepted `--unattended` (CBN-138.2) and, after flaitron v7's rename, which slug it shipped (CBN-329). The v7 hard cut leaves one answer, so §"Run loop"'s follow-up cue is static. History: [decisions/flaitron-reader.md](flaitron-reader.md) §"Unattended capability probe — filing probe is token-only (CBN-138.2)".
+
+## Unattended capability probe — file capability rationale (CBN-460)
+
+Context relocated from CONTRACT; current rules remain there. Unlinked section references and positional wording refer to the original CONTRACT context.
+
+**A capability probe, not a version floor.** The question that decides the outcome is whether *this* pin's arg parser accepts the token, and a declared tag can disagree with the files on disk. Why a version comparison was rejected: [decisions/flaitron-reader.md](flaitron-reader.md) §"Unattended capability probe — version floor rejected".
+
+## Flaitron reader — marker-position rationale (CBN-460)
+
+Context relocated from CONTRACT; current rules remain there. Unlinked section references and positional wording refer to the original CONTRACT context.
+
+The marker's position is load-bearing, and both misplacements fail **silently** — which is why tests pin them: a leading-`!` shape (`[!unattended]`) matches no `TASK_LINE` slot and drops the whole line from the parse, and a lowercase `[unattended]` placed before (or without) `[model]` is captured *as* the model token, routing effort instead of gating safety. The upstream marker and park-code history: [decisions/flaitron-reader.md](flaitron-reader.md) §"Flaitron reader — upstream marker work (CORE-494, CORE-495)".
+
+## Parse contract — self-consistency rationale (CBN-460)
+
+Context relocated from CONTRACT; current rules remain there. Unlinked section references and positional wording refer to the original CONTRACT context.
+
+**What the guard test does not catch (CBN-111).** Both reads above — the pin named here and `SPEC.md`'s own `**Version:**` line — come from the *same* local `.flaitron/core` checkout, so the test can only fail when they disagree with each other. Currency against flaitron's latest tag is the "version pin" axis of Fleet HQ's alignment check, outside this suite by design: [decisions/flaitron-reader.md](flaitron-reader.md) §"Parse contract — the guard's self-consistency limit (CBN-111)".
+
+## Parse contract — malformed-frontmatter rationale (CBN-460)
+
+Context relocated from CONTRACT; current rules remain there. Unlinked section references and positional wording refer to the original CONTRACT context.
+
+**Tasknote frontmatter.** Reading is **skip-not-fail**, the same policy §"Run record" applies to run records. A tasknote whose frontmatter is missing, valid YAML that is not a mapping, or a mapping whose `status` is not a string is treated as having *no* open status — the note drops out of the open set and the run continues on the remaining candidates. It is never raised. One malformed note costs one candidate; raising would have let it block the whole project's pick.
+
+## Parse contract — leniency boundary rationale (CBN-460)
+
+Context relocated from CONTRACT; current rules remain there. Unlinked section references and positional wording refer to the original CONTRACT context.
+
+The narrow scope is deliberate. Leniency covers only the shapes a producer's own editing can break. A missing `.flaitron/PLAN.md` is still a user error (exit 2), because that is a registration mistake rather than a malformed file.
+
+## Marker coverage — evaporation-guard rationale (CBN-460)
+
+Context relocated from CONTRACT; current rules remain there. Unlinked section references and positional wording refer to the original CONTRACT context.
+
+- **Marker drift — the evaporation guard (CBN-125).** Coverage is a point-in-time figure with no memory, and the fleet edits PLAN lines for reasons that have nothing to do with markers: a flaitron line rewrite that preserves the visible task text silently drops the trailing `[unattended]` bracket token. `flaitron.marker_drift(tasks, baseline)` diffs the current read against a marked set a past run recorded (§"Marked-set baseline") and returns one `Denial` per row that was armed then and does not dispatch now, in the same dispatch order and from the same `_denial` constructor the other two lists use. The live incident that motivated it: [decisions/flaitron-reader.md](flaitron-reader.md) §"Marker coverage — drift incident (CBN-120.2, CBN-125)".

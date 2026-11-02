@@ -14,7 +14,7 @@ Headings name the `CONTRACT.md` section each entry backs.
 
 The tee closed CBN-110's remaining gap: `WORKER_EXITED` and `TIMEOUT` carried no code and no line, so a usage-limit refusal, a rejected CLI arg, and a genuine crash were indistinguishable on the run record. On a clean exit stderr is usually empty, so the stdout line (CBN-200) is what actually carries the diagnostic.
 
-The tee was live from the start, but text-mode `claude -p` prints nothing until it exits, so a worker killed mid-task left a 0-byte log (2026-10-18, ~20 minutes of edits, no trail). CBN-377 switched the `claude_code` recipe to `--output-format stream-json --verbose` (`-p` refuses stream-json without `--verbose`) and compacts each event before the tee writes it: one log line per tool call or assistant message, failed tool results kept, successful ones and allowed rate-limit events dropped. Those progress lines are log-only. The stdout tail gets only what text mode printed — the `result` event's text, unprefixed and line by line, or a non-JSON line — so the usage-limit match (CBN-282) and the stdout cause pick (CBN-292, CBN-300) never read a worker's own `grep "usage limit"` as a refusal. Compaction lives in `local.py`, the adapter that owns the stream, as the recipe row's own `compact`; `wait` and `launch` never see JSON. The other recipes stay raw: codex already streams, and grok's and cursor's stream flags are unverified.
+The tee was live from the start, but text-mode `claude -p` prints nothing until it exits, so a worker killed mid-task left a 0-byte log (2026-10-18, ~20 minutes of edits, no trail). CBN-377 switched the `claude_code` recipe to `--output-format stream-json --verbose` (`-p` refuses stream-json without `--verbose`) and compacts each event before the tee writes it: one log line per tool call or assistant message, failed tool results kept, successful ones and allowed rate-limit events dropped. Those progress lines are log-only. The stdout tail gets only what text mode printed — the `result` event's text, unprefixed and line by line, or a non-JSON line — so the usage-limit match (CBN-282) and the stdout cause pick (CBN-292, CBN-300) never read a worker's own `grep "usage limit"` as a refusal. Compaction lives beside the tee in `worker_log.py` (split out of `local.py`, the adapter that owns the stream, by CBN-401), as the recipe row's own `compact`; `wait` and `launch` never see JSON. The other recipes stay raw: codex already streams, and grok's and cursor's stream flags are unverified. The `progress:` heartbeat's worker activity (CBN-EPIC-449.3) reads the same log-only side: the compactor also returns one redacted `tool:` line per `tool_use` block, `tee_stream` hands only those to an `on_progress` callback, and `LocalWorker` counts them and keeps the last one for `Worker.activity`. This moves the echo boundary: before it, nothing a worker printed reached the operator's terminal; now a tool name and a redacted target do. The redaction is built from the structured block, not by re-parsing the log line (CBN-458), on an allow-list: a Bash target is cut to its program name, fail-closed (plain leading `VAR=value` words skipped; a quoted or `+=` assignment, a subshell, or any non-plain first word leaves a bare `tool: Bash`), because a command's arguments are where a secret value would sit (CBN-455); Read, Edit, Write, NotebookEdit and Glob keep their path; every other tool — Grep's pattern, WebFetch's URL, an MCP or Monitor call, and any tool added later — shows its name only. The log keeps the full call. Assistant text, tool results, and the stdout tail still never do. A raw recipe has no progress lines, so its heartbeat stays without activity rather than printing `0 tool calls`.
 
 ## Worker interface — guard hook and effort slot shape
 
@@ -35,6 +35,12 @@ The `exited` status exists because `local` is a one-shot CLI; a persistent sessi
 Since CBN-138.2 the prompt *asks* a worker to file what it discovers, so dirt made of `.flaitron/PLAN.md`, sidequest stubs, and tasknotes is now routinely something Caobunga itself requested — and it read identically to an operator's half-edited source tree. CBN-138.1 F3 named the gap as a refusal whose cause was unnamed, not one that was wrong, so the fix is a message and never an exemption.
 
 The predicate is all-or-nothing because a filing beside an unreviewed edit is not a filing to commit, and because that is what keeps every CBN-EPIC-17.3 assertion true unedited. It is path shape only, never file content, so an unrecoverable (C-quoted) path is never a filing and bias-to-refuse survives into the message.
+
+**Ownership from the run record (CBN-434).** Path shape alone offered the commit over a live operator session's in-flight `DEPLOY-061.md` in a fleet repo (CBN-429 F1). Pasting it would have committed another session's working note under a worker-filing subject. A tasknote or sidequest stub now counts only when its `<ID>.md` stem is the last run's `task_id` or one of its `new_rows`. The source is Caobunga's own record, not the file, so the §"Fleet boundary" reason for refusing content reads still holds. The check lives in `presence.tree_state` (via `owned_ids`), not in the gate alone, so `caobunga status` keeps stating what the gate refuses on (CBN-130). `.flaitron/PLAN.md` stays path-shape: the line names a file, not an id (CBN-435 below later gated it on `new_rows`). A row-level match against `new_rows` would be CBN-299's window-commit question, which this does not reopen.
+
+**PLAN needs filed rows; the command names paths (CBN-435).** CBN-434's review left two gaps. First, a PLAN.md-only edit was still a filing by path shape, an operator's hand edit included. It now counts only when the last run recorded `new_rows`. That is the record again, not the PLAN content, so the content-read boundary holds and CBN-299 keeps the row-level match. `new_rows` is diffed from a working-tree read at close, so a worker's uncommitted rows are in it. Accepted residual: an operator's PLAN edit made after a run that did file rows still gets the offer. Second, `git add .flaitron` also staged the candidate's exempt note and any other `.flaitron` file, and a bare `commit` would carry whatever was already staged. The command now names the blocking paths, shell-quoted, on both `add --` and `commit … --`. CBN-138.4 had chosen a directory to keep a path list from truncating, but the message already prints every blocking line (CBN-287), so that reason no longer holds. A rename or copy line is never a filing: porcelain names the destination, and `commit -- <dest>` would leave the source's staged deletion behind, while the source itself was never classified. `presence` takes the last `RunRecord` itself, so each caller passes one argument rather than two facts derived from it.
+
+**A died worker's filing is on the failure record (CBN-436).** CBN-435's review found that `launch._failed_from_worker` never measured `new_rows`, so the hint above stayed generic for exactly the filing a worker wrote and then died holding. The failure snapshot now carries the same working-tree diff, measured again after the worker stops so a row filed during the settle grace is on the record. A death that filed nothing still leaves the field unset.
 
 ## Run loop — candidate-tasknote exemption and `-uall`
 
@@ -78,6 +84,8 @@ The PLAN line's other route, relaunching a worker that exited 0 with a dirty tre
 
 CBN-274's second Codex retry (invocation `20261009T152253989Z`, a fleet repo's CORE-243) ended with a worker that reported a park and wrote `park-reason: input-needed`, but left `status: in-progress`. The loop recorded `failed` / `worker-exited` and did not launch FE-475. That is the right verdict: the metadata disagreed with itself, and a park reason alone is not proof of a park. Before this, only the unattended continue prompt named the park shape; the fresh launches relied on the pinned skill's own instructions. The cue asks the worker to re-read its note before exiting. Three alternatives were declined. Reading `park-reason:` as a park would let a half-written note pass as the worker's verdict. Rewriting the target's tasknote is a repair the supervisor does not make. A degraded twin was unnecessary, because the sentence asks only for `status: blocked`. Like the foreground-only sentence, the cue is best effort: no test can prove a model will follow it, which is why detection stays strict.
 
+**Second sentence (CBN-459).** CBN-446 retired the cue's park-commit request because flaitron v8.1.0's park commits its own note. That left one edit uncovered: a `status:` fix the cue itself provokes, which stays uncommitted and holds the repo. That happens either after the recipe's commit or when no park commit was made at all (the CORE-243 shape). The new sentence asks for a commit of just that note, only when it is the tree's lone uncommitted change (the recipe's own condition), and as a new commit, because the recipe forbids amending. It names no subject format, so it restates nothing of flaitron's. A first draft conditioned it on "after your park's commit". The CBN-459 review showed that misses the no-commit case and leaves "the same way" open to an amend.
+
 ## Run loop — park-status mismatch diagnostic (CBN-328)
 
 CBN-327's cue is best effort, so the loop also names the CORE-243 shape when it happens: a `worker-exited` summary gains `park-reason present but status in-progress, not blocked` when the open note carries both. It reads the same `list_open_tasknotes` rows the park branch uses and changes no verdict, because a park reason alone is still not proof of a park. It fires on `worker-exited` only, the escalation CBN-327 pinned; a `timeout` with the same note shape is not named. The clause sits ahead of the tree line because `summary` is clipped at the tail.
@@ -104,7 +112,7 @@ The pin is not `coverage.marked_tasks`: that is the *eligible* set, and a marked
 
 ## Run loop — usage-limit overlay stays per-invocation (CBN-289)
 
-`CONTRACT.md` §"Run loop" → "Usage-limit re-pick (CBN-213)". Carrying the exhausted overlay across invocations was considered and declined: the cost is one fast-failing launch per invocation, the re-pick succeeded in every sampled run, and a persisted hint would amend the CBN-213 non-negotiable. Revisit if wasted launches become costly or exhaustion shows up on more than one provider/project.
+`CONTRACT.md` §"Run loop" → "Usage-limit re-pick (CBN-213)". A re-pick that "cannot launch" (CBN-316) is a `UserError` from `launch` or `send`, such as `Unlaunchable` for a binary gone since `which`; the worker that already ran keeps the record. Carrying the exhausted overlay across invocations was considered and declined: the cost is one fast-failing launch per invocation, the re-pick succeeded in every sampled run, and a persisted hint would amend the CBN-213 non-negotiable. Revisit if wasted launches become costly or exhaustion shows up on more than one provider/project.
 
 ## Run loop — suite timing shift and worker-evidence incidents (CBN-167, CBN-171)
 
@@ -114,7 +122,7 @@ The worker's own Phase 3 run is not the step's evidence because CBN-167 and CBN-
 
 ## Run loop — drain exit reasons (CBN-119.4)
 
-This closed `CBN-EPIC-18.N` Finding 5, which carried forward that a drain did not discriminate an **exhaustion exit** (everything eligible was walked) from a **marker exit** (the walk stopped because the next row was unmarked). Both ended the loop with no candidate, no error, and no `next_task` on the last record, so the two were indistinguishable on every surface. Finding 5 deferred the gap to a live trial; CBN-119.4 closed it on the loop's own state instead: at the exit the loop already holds the denial list, and whether it is empty *is* the difference. The set had a `stem-change` reason and a stem-scoped verdict while `plow` existed; both went with it at CBN-134.
+This closed `CBN-EPIC-18.N` Finding 5, which carried forward that a drain did not discriminate an **exhaustion exit** (everything eligible was walked) from a **marker exit** (the walk stopped because the next row was unmarked). Both ended the loop with no candidate, no error, and no `next_task` on the last record, so the two were indistinguishable on every surface. Finding 5 deferred the gap to a live trial; CBN-119.4 closed it on the loop's own state instead: at the exit the loop already holds the denial list, and whether it is empty *is* the difference. The `drain:` echo and the task-record schema stay as they were; the invocation receipt carries the reason separately (CBN-272). The set had a `stem-change` reason and a stem-scoped verdict while `plow` existed; both went with it at CBN-134.
 
 ## Target-tree report — why classification is the deliverable (CBN-123 F3)
 
@@ -133,6 +141,8 @@ CBN-EPIC-14.3 read the missing flag as a syntactic problem (no invocation token 
 ## Continue prompt — point, don't restate
 
 A Caobunga-side paraphrase of Flaitron's park rules would make a Flaitron release a Caobunga contract change (§"Fleet boundary"), so the unattended variant points at the target's own fragment — which the probe has already proved is on disk whenever this variant is sent. The degraded variant points at nothing, because a pin that does not parse the token ships no fragment either.
+
+CBN-459 tightened the pointer. The variant used to list the park as "`status: blocked` plus `park-reason:` … and stop", which read as the whole action and skipped the recipe's lone-park commit. It now says to park "by that file's park recipe" and keeps the two field names only as what the recipe writes, because those are what close detection reads. A pin whose recipe does not commit is warned at `register` and at dispatch (`layout.park_commits`, a capability probe for the CBN-108 reason), never refused.
 
 ## Continue prompt — prose continue over frontmatter conversion
 
@@ -219,10 +229,62 @@ the open tasknote come from the same read `finish` uses. This is report-only, an
 the next readiness check stays the dirty-tree refusal's own fresh read.
 
 **The orphan worker.** A worker is spawned with `start_new_session=True`, so it is
-outside the terminal's process group and can outlive a killed orchestrator. The
+outside the terminal's process group and gets no SIGHUP. Its stdout and stderr are
+piped to the orchestrator's log tee, though, so when the orchestrator dies the
+worker usually dies of EPIPE at its next write; a quiet one can outlive it. The
 verdict is about the orchestrator only. The `process-gone` recovery step says to
 check for a live worker first, and the dirty-tree refusal still guards the repo
 while one writes. Tracking the worker's own pid was considered and left out of scope.
+
+**A closed terminal is caught now (CBN-430).** The opening of this section is the
+2026-10-18 picture: SIGHUP and SIGTERM reached no handler, so a closed terminal
+left `running` and a worker that died mid-task on its dead pipe. `_interrupt_guard`
+now treats a SIGHUP or SIGTERM as a first ^C press, so either one stops the worker
+group and writes `interrupted`, its `detail` naming the signal. The stop reason
+stays `interrupted`: the recovery is the same, and a new code would buy a schema
+change for a fact `detail` already carries. A later SIGHUP or SIGTERM is absorbed
+and not counted, so only ^C presses reach the force-quit. A closed terminal can
+deliver SIGHUP twice (the shell's job hangup, then the kernel's when the shell
+exits), and a `fleet` child also gets the forwarded SIGTERM. Counted, those three
+would force-quit past the receipt with nobody pressing anything. `process-gone` is
+left for what no handler sees: SIGKILL, an out-of-memory kill, a forced quit.
+
+`fleet` children share the fleet's process group, so a terminal hangup usually
+reaches them directly, but a `kill` of the fleet reaches only the parent, and a
+dead parent leaves them on a dead pipe. The fleet therefore forwards SIGTERM once
+to each running child and waits for them, as it does for ^C. A repeat to the fleet
+is absorbed, because raising again would escape that wait; ^C stays the way out,
+as does SIGKILL. Signalling the fleet's own process
+group was rejected because it would also reach the other commands in a pipeline
+such as `caobunga fleet | tee`. A child whose output read raises is still
+SIGKILLed (CBN-EPIC-314.4): nobody drains its pipe, so a SIGTERMed child could
+block writing its unwind.
+
+**Reading the two 2026-10-18 receipts (CBN-418).** Both read `pid unrecorded, last
+stage worker-start` and were found on 2026-10-20. The pid was absent because both
+runs started about eight hours before CBN-376 added the field. Every receipt since
+2026-10-19 carries it. It cannot be recorded any earlier: `InvocationTrace` takes
+`os.getpid()` when it is built, and the first checkpoint, written before the lock,
+already holds it. `worker-start` is set before the launch and stays set until the
+worker returns, so it means the orchestrator died while its worker ran, not while
+the worker was starting. The two-day gap is this reconcile's scope. It runs only on
+the slug's next launching `run`, and neither repo ran again until 2026-10-20.
+Surfacing a dead `running` receipt sooner is CBN-421.
+
+**Surfacing before the next run (CBN-421).** `status` now reads `running` receipts
+and checks each recorded pid, the same evidence the reconcile uses. `status <id>`
+always prints a `receipts:` block. The fleet form prints a `stale:` line under the
+table only for a receipt whose pid is gone, because a column would show a dash on
+every row for a state that is rare. It reports and never rewrites: `status` takes
+no run lock, and `abandoned` stays the verdict of a run that holds one. For the
+same reason a receipt with no pid reads `unknown`, not `stale`, since only the lock
+proves it dead. Each line says whether a `run` will actually reconcile it, using
+`_execute_run`'s own gates: a disabled project stops before the lock, `observe`
+returns before the reconcile, and a pid-less receipt for another path is never
+proven dead. A dead pid is re-read before it is called stale, because a run that
+wrote its terminal receipt and exited after the scan has finished, not died. A
+reused pid reads `live`, the residual already accepted above. The digest and the
+status API were left alone. The digest folds run records, and a receipt is not one.
 
 **`observe` reconciles nothing.** It writes no receipt of its own, and it keeps
 that write-free posture here too. A stale receipt can only come from a launching
@@ -232,7 +294,9 @@ tier, and the next launching run picks it up.
 
 A worker running under `bypassPermissions` could run `caobunga register <path> --tier … --replace`, which rewrites the record with `enabled: true`, or could Write/Edit `$CAOBUNGA_HOME/projects/<id>.yaml` directly. Either way it could retier or re-enable a project without the operator, and `CONTRACT.md` §"Non-negotiables" makes registration the operator's deliberate act.
 
-The hook and `store.default_home()` both anchor a relative `$CAOBUNGA_HOME` to their own process's cwd, which would otherwise diverge between the orchestrator and the worker (the hook runs rooted in the project cwd); CBN-251 closed that gap by having `local._default_spawn` re-export the already-absolute value into the worker's environment rather than letting a relative one pass through unchanged.
+The hook restates `store.default_home()`'s resolution rather than importing it, so `hooks` stays off `store`'s import graph; a test pins the two together. (Moved from CONTRACT §"Run loop" at CBN-EPIC-450.3 to make room within its word budget.)
+
+The hook and `store.default_home()` both anchor a relative `$CAOBUNGA_HOME` to their own process's cwd, which would otherwise diverge between the orchestrator and the worker (the hook runs rooted in the project cwd); CBN-251 closed that gap by having `local._default_spawn` re-export the already-absolute value into the worker's environment (since CBN-401, the `Store.home` it is handed, made absolute) rather than letting a relative one pass through unchanged.
 
 The one-command token match is a deliberate exception to "screening shell text is a grammar this side does not own", scoped to a single subcommand.
 
@@ -291,3 +355,287 @@ The CLI tracks the last dumped record by identity because a bare flag hid every 
 ## Run loop — Hermes-era steps retired (CBN-258)
 
 The Hermes brief, launch, and observation window that sat between the record write and the last-run card retired at CBN-258. The suite's `suite_verbs.TIMEOUTS` (600 / 120 / 300 s) are the ceilings the retired Hermes reviewer's `code_suite` server used.
+
+## Run loop — settle and final attribution history (CBN-275, CBN-352, CBN-356, CBN-357)
+
+> Extracted from CONTRACT at CBN-411. This passage preserves the explanation and its original rule context; CONTRACT is authoritative for current rules. Unlinked section references in this excerpt refer to CONTRACT.
+
+Close detection fires on the worker's commit, but the worker is still finishing its own post-closure git work at that moment. Before any review step touches the worker repo, the loop waits for the worker to stop reporting `processing` — up to `SETTLE_GRACE` (30s), then proceeds regardless (CBN-EPIC-9.5). A grace, not a gate: a wedged worker costs one pause, never an abort. That post-closure work can amend the detected close commit off-branch, so once settled the loop re-reads a closure whose detected `commit_sha` is no longer reachable from `HEAD` (`close.reinspect_settled`, CBN-275) and records the final commit, tasknote, and summary; at that settle re-read, a commit stacked *on* the close leaves it reachable and the record unchanged (the post-suite pass in CONTRACT §"Run loop" does attribute it); an amend plus a stacked commit re-reads to the amended close with the stacked commit foreign (CBN-279); and a git read that fails outright, or a re-read that no longer classifies as a closure, keeps the first snapshot. The worker can also outlive both the grace and the suite. In CBN-351 a `## Completed` → `PLAN-ARCHIVE.md` rotation either committed mid-suite (visible as that verb's `tree_changed`) or was killed half-done. So once the suite returns, the loop shuts the session down *before* writing the record and re-reads the summary's `tree:` line from the now-final tree (CBN-352). The worker keeps the whole settle-plus-suite window, and the record never says `0 file(s) left` over dirt that the next dispatch would refuse on. Between the shutdown and that tree read, the closure is re-read once more, this time even when the close is still on-branch (CBN-356). A commit stacked during the suite, like a fleet repo's rotation, then lands in `foreign_commits`, and an amend moves `commit_sha` to the amended close. The measured `suite` is kept. That pass is strict (CBN-357): a re-read of a still-reachable close that git cannot attribute keeps the first snapshot instead of falling back to `HEAD`, while one that names a different commit is a real re-attribution (a no-tasknote close whose note is archived in a stacked commit) and is adopted.
+
+## Run loop — exemption rationale and legacy card dirt (CBN-411)
+
+> Extracted from CONTRACT at CBN-411. This passage preserves the explanation and its original rule context; CONTRACT is authoritative for current rules. Unlinked section references in this excerpt refer to CONTRACT.
+
+**The candidate's own tasknote is the one exemption.** A stranded `in-progress` note is *always* uncommitted (Flaitron commits it only at Phase 4), so without the exemption every `CBN-109` resume would refuse. `-uall` is part of the exemption, not a verbosity choice. The exemption matches the parsed porcelain path, not a git pathspec. A half-edited source tree still refuses, and the operator cleans it themselves (v1 failure policy). A leftover `caobunga-status.md` from before CBN-188.3 is ordinary dirt — the operator's to `git rm`. Why: [decisions/worker-run-loop.md](worker-run-loop.md) §"Run loop — candidate-tasknote exemption and `-uall`".
+
+## Run loop — presence derivation boundary (CBN-411)
+
+> Extracted from CONTRACT at CBN-411. This passage preserves the explanation and its original rule context; CONTRACT is authoritative for current rules. Unlinked section references in this excerpt refer to CONTRACT.
+
+**The derivation lives in `presence.py`, not in the gate (CBN-130).** `git.git_dirt` reads the tree and `presence.tree_state` applies the exemption by matching the parsed porcelain path against the open tasknotes. The gate refuses on that result, and the status report renders the same one — one implementation of one safety rule ([decisions/worker-run-loop.md](worker-run-loop.md) §"Run loop — why the derivation lives in `presence.py` (CBN-130)"). A porcelain line whose path this reader cannot recover — git C-quotes unusual paths — stays **blocking**, so the parse fails in the same direction the read does (CONTRACT §"Run loop": an unreadable answer is not "clean").
+
+## Run loop — next-task validation rationale (CBN-411)
+
+> Extracted from CONTRACT at CBN-411. This passage preserves the explanation and its original rule context; CONTRACT is authoritative for current rules. Unlinked section references in this excerpt refer to CONTRACT.
+
+**`next_task` is read at the run's own dispatch posture (CBN-117).** It is a *dispatch* claim — `status_card.py` renders it as `- **next:**` into the caller-side last-run card (§"Last-run card") — so `inspect_close` takes an `unattended` flag and passes it to `read_project`. That flag is `record.tier in UNATTENDED_TIERS`, the same expression the drain uses for its own next read, and deliberately **not** `supports_unattended(root)`, the target's capability probe (CBN-108). At every posture `suggested_next` is *validated* rather than preferred — kept when `flaitron.dispatchable` says that id would dispatch at this posture, otherwise fallen through to `candidate`, which is already posture-correct; an id absent from PLAN denies, the same bias-to-refuse the safety and `Blocked by` dimensions apply. `dispatchable` resolves through `eligibility`, so the marker rule is not re-derived (§"Flaitron reader"). **The attended path is validated too (CBN-151).** Attended validation consults nothing marker-shaped: `eligibility` at `unattended=False` is the posture-blind membership and `Blocked by` dimensions only, so it drops exactly what an attended pick would refuse (a checked row, a row outside the launch buckets, a parent-epic tracking row, a `Blocked by` row) and nothing an operator would have run.
+
+## Run loop — drain pin boundaries and mid-run seeds (CBN-411)
+
+> Extracted from CONTRACT at CBN-411. This passage preserves the explanation and its original rule context; CONTRACT is authoritative for current rules. Unlinked section references in this excerpt refer to CONTRACT.
+
+**A drain is pinned to the marked set its first read saw (CBN-246).** Why: [decisions/worker-run-loop.md](worker-run-loop.md) §"Run loop — why a drain is pinned (CBN-246)". `execute_run` records, on the first read, the ids carrying the marker that `eligibility` allows with their `Blocked by` clause set aside, and on every later read stops with `unpinned` instead of dispatching a candidate outside that set. The pin is neither `coverage.marked_tasks` nor the bare marker (CBN-260; why: [decisions/worker-run-loop.md](worker-run-loop.md) §"Run loop — drain pin shape (CBN-246, CBN-260)"). Only the clause is set aside, so a row blocked *and* `[handoff]` stays out. It applies whoever marked the row — Caobunga cannot tell an operator's seed from a worker's — so an operator who seeds mid-drain gets the row on the next `run`. The stop also rides the invocation receipt (§"Invocation results"); the next `run` pins whatever is marked then, so the detail tells the operator to check who marked the row before re-running. **The pin is by id, not by row content** — a worker can still rewrite the text of a pinned row that has not run yet, or strip its `Blocked by`; the pin closes the arming of rows the first read would not have dispatched, and nothing wider. Same exit code (0) as the other drain exits. `gated` dispatches once from its first read and is untouched.
+
+## Run loop — filing-message bounds (CBN-411)
+
+> Extracted from CONTRACT at CBN-411. This passage preserves the explanation and its original rule context; CONTRACT is authoritative for current rules. Unlinked section references in this excerpt refer to CONTRACT.
+
+**A filing gets its own message, never its own exemption (CBN-138.4).** When *every* blocking line is a path a worker writes to file a discovery — `.flaitron/PLAN.md`, `.flaitron/sidequest/*`, or a tasknote — the refusal says so and offers the commit (`{id}: target repo has {n} uncommitted change(s), all of them flaitron filing artifacts a dispatched worker writes; if a worker filed this, commit it: git -C {root} add .flaitron && … — then re-run: …`). Three properties bound it. The predicate is **all-or-nothing** — one line of operator dirt returns the generic message verbatim. It is **path shape only**, never file content: an unrecoverable path (git's C-quoting) is never a filing, and a collapsed `?? .flaitron/` directory line matches nothing and falls back. And Caobunga **prints the command, never runs it** — cleaning a target tree is as much the operator's act as seeding a marker (§"Marker coverage", read-only in both directions). The exit code, the placement, and the set of lines that block are untouched; the report states the same condition (§"Target-tree report"). Why a message and why these bounds: [decisions/worker-run-loop.md](worker-run-loop.md) §"Run loop — filing-artifact message (CBN-138.4)".
+
+## Target-tree report — always-visible verdict (CBN-411)
+
+> Extracted from CONTRACT at CBN-411. This passage preserves the explanation and its original rule context; CONTRACT is authoritative for current rules. Unlinked section references in this excerpt refer to CONTRACT.
+
+The operator-presence gate's verdict, rendered before a launch has to reveal it (CBN-130). `caobunga status <id>` always prints one `tree:` block — `clean`, `dirty`, or `unreadable` — on the same rule §"Marker coverage" applies to drift: a guard that renders nothing when it cannot answer is indistinguishable from one that checked and found nothing. The fleet table carries a `tree` column (`clean` / `dirty (N)` / `unreadable`), and both Status API endpoints carry a `tree` field (§"Status API"), as does the dashboard.
+
+## Run loop — pre-dispatch suite baseline (CBN-420)
+
+Five dispatches parked `input-needed` on a suite failure their own diffs did not cause: CBN-377 and CBN-399 on `test_contract_flaitron_spec_pin_matches_submodule` after flaitron bumps, and three tasks in a fleet repo (CORE-EPIC-2.2, CORE-010, CORE-012) on a `.env`-bleed failure in `test_client_sends_bearer_token`. Each worker spent 4–22 minutes learning the red was not its own. CBN-215 had parked the same way earlier (CBN-219, CBN-255). The last recorded closure suite before every one of these was **green**: the red arrived through operator commits between invocations. So no stored verdict could have stood in for a real run on the tree being dispatched into.
+
+Three shapes were weighed, and the operator chose the first:
+
+- **Refuse on a non-green baseline** (chosen) — run the suite on the clean tree before launch and refuse that repo with exit 2, like the dirty-tree gate. The worker prompt is unchanged and "never close on red" is untouched. Detection moves from a worker session to a deterministic ~90 s check.
+- **Baseline and compare** — record the failing set, tell the worker which failures pre-exist, and compare at closure. More permissive, but it needs a prompt change and a per-stack failure-set parser, and it lets a worker close over a red it was told to ignore.
+- **Report-only echo** — visible, but still spends the worker session.
+
+**Once per invocation, before the first dispatch.** A drain continues only on a green post-close suite, which already measured the tree the next task starts from, so a second baseline there would catch nothing. Reusing a prior record's verdict when HEAD is unchanged was declined as extra sha matching for a saving the incidents show would rarely apply.
+
+**Any non-green refuses** — the post-close gate's `suite_stops` threshold, so the pre-launch and post-close gates cannot disagree. One consequence: a repo that cannot answer the verbs (`refused`) no longer gets its one `gated` task before the suite stops it. Every fleet repo answered the fitness probe at the fleet-drain preparation, so that cost is expected to be rare.
+
+**Placement.** After the operator-presence gate, since a suite on a dirty tree measures the operator's edits and dirt is the more specific refusal. Before the provider pick, which lives inside `launch_until_close`. Accepted cost: a machine with no pickable provider spends one suite before its exit-5 refusal.
+
+**Evidence, not a record.** A refused baseline writes no task record and changes no record schema. The full output is saved under `suites/` with a `-baseline` suffix and named by the receipt's `suite_log` and the refusal message, so the failing test is a file read away. In a `fleet`, the child's exit 2 is a per-repo skip like a dirty tree: other repos run.
+
+**Review hardening.** The external review found two defects in the first cut, both fixed before close:
+
+- The launch's `start_sha` and dirt gate were read *before* the baseline. An operator commit landing during the suite would then have read as the worker's. Both are now read again after a green baseline, so suite output left untracked refuses as dirt rather than being inherited by the worker.
+- A `just`-less host refused every repo with exit 2, which `fleet` folds as a skip, so the fleet would have read green. That one refusal now exits 5.
+
+The other review notes (first-dispatch only, placement before the pick, the doubled suite cost, refusing on `timeout`) restate the choices above.
+
+## Run loop — park and continue (CBN-443)
+
+The 2026-10-29 fleet run showed a park stopping its repo twice: `proceed-on-green` ended the drain on `blocked`, and the untracked parked note then refused every later `run` on the dirt gate (CBN-252). A fleet repo's CORE-016 parked `drift` and left only its own note, yet held the repo until the operator acted. CBN-438 parked `visual-confirm` with seven modified `frontend/` files, and holding the repo there was right.
+
+**Who cleans the tree.** CBN-252 had already ruled out exempting a parked note from Caobunga's dirt gate, because the next worker's own `/ft-task` foreign-dirt gate refuses an untracked sibling note anyway. Caobunga's code writes nothing into a producer (CONTRACT §"Fleet boundary"), so the commit has to be the worker's. Flaitron v7.5.0's park recipe does not commit. The operator chose a second sentence on the park-check cue now, plus a filed upstream proposal that flaitron's `--unattended` park commits natively; the sentence retires once a pin carries that. Retired at CBN-446 (2026-11-01): flaitron v8.1.0 (CORE-843) landed that commit in its park recipe, and the sentence was dropped once every registered target pinned v8.1.0 or later. A worker's park commit now comes from its pinned flaitron, not from Caobunga's prompt.
+
+**What counts as clean.** The operator chose *workflow paths only*: an empty tree, and nothing but `.flaitron/PLAN.md`, `.flaitron/tasknote/…` and `.flaitron/sidequest/…` changed since the task's `start_sha`. The narrower *parked note only* was declined because a worker may file a follow-up before it parks. Source is excluded because a park runs no suite, and a drain's later dispatches skip the baseline on the grounds that the last post-close suite measured their tree (CBN-420). `.flaitron/core` is excluded because a pin move changes the suite's own inputs. Commits are not told apart by author, so an operator's source commit mid-run holds the repo; that is the conservative direction.
+
+**Which rows a park gates.** No new rule. The re-read already denies the parked row (`parked`), any row `Blocked by` it (`blocked`, transitively, since the parked row never completes), and its epic's audits (`audit`, since a sibling is open).
+
+**Receipt semantics.** The operator chose to keep a parked-then-continued invocation unsuccessful. The parked row stays in `remaining_tasks`, so the status is `incomplete` with no special case, and `fleet` marks the leg stopped short. A park is still an escalation the operator has to see, even after the drain went on. The receipt's `parked` list carries the facts. One renderer, `InvocationPark.handoff`, produces the line the echo, the card and the `fleet` cell print, so the three surfaces cannot disagree.
+
+**The card.** It is per-run, so a drain that went on past a park would overwrite the only card that named it. The invocation's handoff lines are threaded from the trace through `report` into the default card writer. A run-record field was declined because run records are Fleet HQ's input. The injected `publish` seam is test-only and does not take the lines.
+
+**Review hardening.** The external review found two defects in the first cut, both fixed before close. First, the hold was decided in the loop after `finish` had already written the card, so a park that held the repo, or one with nothing after it, left a card that never named it. The decision now runs in `finish`, before `report`. Second, `git diff --name-only` followed renames, so a source file moved into a workflow directory listed only its new path and read as clean. `changed_paths` now passes `--no-renames`. The review also caught that a De-scope park was told to resume, which has nothing to resume (`recovery._parked_descoped`). Its handoff now says to confirm and close the row. One note was declined: the park commit lands only when the note is the sole change (CBN-443's cue sentence then; flaitron's park recipe since CBN-446), which is stricter than `park_hold`. Flaitron's `/ft-file-task --unattended` commits its own filing, so a park's only uncommitted change is its note. Where the commit condition and the predicate differ, holding the repo is the safe direction.
+
+**Late park commit.** `wait` returns as soon as the note reads `blocked`, before the worker's commit lands. `reinspect_settled`'s final pass, which runs after the worker is stopped, now re-reads a park too, so the record's `commit_sha` names the park commit instead of leaving it unattributed.
+
+## Run loop — repo-family run lock and the worktree start (CBN-EPIC-450.2)
+
+CBN-EPIC-450 moves every unattended dispatch into its own `wt-<TASK-ID>` worktree (Flaitron `docs/EXTERNAL-AGENTS.md` step 10). This child adds the identity and the start primitive. The loop does not use the primitive yet; CBN-EPIC-450.4 threads it through.
+
+**Why the lock now covers linked worktrees.** CBN-EPIC-313.6 keyed the lock on `git rev-parse --show-toplevel` so that each linked worktree, which has its own index and `HEAD`, kept a separate lock. That reasoning held while every run stayed in the checkout it was registered at. Isolated dispatch breaks it. A branch run in a linked worktree lands into the main checkout by fast-forward, so a run registered at a linked worktree and a run at its main checkout both reach the same `HEAD`. The key is now the family's main checkout (`git.main_worktree`). The operator chose it over `--git-common-dir`. In a main checkout it *is* `--show-toplevel`, so existing lock files and the nested-alias rule carry over unchanged. Only a linked worktree reads `git worktree list --porcelain` for the main entry. The fallback is unchanged too: when git cannot answer, the lock keys on the record path and refuses nothing on its own. The strict reads belong to the worktree start.
+
+**Review hardening (identity).** The first cut took the main entry of `worktree list` everywhere. The external review found three problems with that, all fixed before close. First, in a submodule or `--separate-git-dir` checkout that entry names the git directory, not the working tree. Second, `-z` needs git 2.36, and on older git the silent fallback to the record path would have split nested aliases onto separate locks. Third, `Path.relative_to` failed when a registry path's letter case differed from the disk's (APFS keeps both `~/code` and `~/Code` resolvable). `git.repo_identity` now reads `--git-dir --git-common-dir --show-toplevel --show-prefix` once. It compares the two dirs by file identity, because git prints one of them in the caller's spelling. It takes the nested subpath from git's own `--show-prefix` and uses no `-z` or `--path-format`. A second review round found two pre-2.25 gaps. Old git answers `--show-toplevel` in a bare repo with an empty line, and that now reads as no working tree rather than the cwd. Before 2.13, git also printed `--git-common-dir` relative to the toplevel. Caobunga assumes git 2.25 or later and says so in `repo_identity`.
+
+**Four roots, kept apart.** `WorktreeContext` keeps the registry root (identity only), the landing root (main checkout), the worker root (the linked worktree), the execution root (the registry path's subpath inside it, for nested registrations), the base SHA, and the branch as separate fields. CBN-EPIC-450.1 found `finish._record_park` rebuilding a root from `record.path`. Overwriting the registry path with the worker path would make every such read wrong without any error.
+
+**Refuse, never reuse.** The start follows the pinned `docs/WORKTREES.md` §"Procedure": check for a collision, run `worktree add -b`, then `submodule update --init` (non-recursive, pinned gitlinks). It refuses, before creating anything, on:
+
+- a base that is not a full commit id, which also keeps an option-shaped value out of `worktree add`;
+- a registry path outside a working tree (not a repository, or bare), inside a linked worktree, or in a submodule checkout (its `-worktrees/` sibling would sit inside the superproject's tree);
+- an existing `wt-<ID>` branch;
+- anything at the target path;
+- a worktree git still has registered there after its directory was deleted by hand, compared resolved and case-folded per `_same_repo`.
+
+A branch with no worktree counts, because it may hold the only copy of a run's work. Each check is a strict read: a nonzero answer refuses at exit 2, and a hang raises `GitUnreadable` at exit 5. A hang during a setup step is also exit 5 (`Unlaunchable`), but its message still names the leftovers. The start does not create the `-worktrees/` parent itself; `worktree add` does. If `worktree add` or the submodule step fails (for example a submodule clone that cannot reach its URL), the refusal states exactly what is left: the branch, the worktree registration, the directory, or "nothing was left behind". A nested registration whose subpath is not tracked at the base commit refuses the same way, because the worker would have no directory to run in. The operator chose to keep leftovers rather than roll them back. The collision check then blocks the id until someone inspects them, which is the rule an orphan from any earlier start gets, so a setup failure needs no second cleanup path. Both setup steps get `CHECKOUT_TIMEOUT` (300 s) instead of `GIT_TIMEOUT`, since a submodule init may clone over the network. Modules outside `git.py` run git through its public `git_run`, which carries the same timeout and error policy as `_run`.
+
+## Run loop — suite spawn bounds and record timing (CBN-174, CBN-EPIC-314.2)
+
+Moved from CONTRACT §"Run loop" → "Deterministic suite" at CBN-EPIC-450.3, to make room within its word budget; the rules are unchanged.
+
+`suite.run_suite` reaches every bound through `suite_verbs.run_verb`, by call and not by copy: the fixed argv, the registry check, porcelain before and after, and the detached process group (`spawn.run_detached`). That group is killed on a timeout or on any other exception mid-run, an interrupt included; its post-kill drain is bounded, and its output is decoded with `errors="replace"`. The result rides the single record write as `suite`, not a second in-place rewrite, so `closed_at` ("clock at write") lands after the suite and a run's derived duration includes it. Nothing keys on that shift. The `suite.lock` wait (CBN-308, above) also sits inside the run's duration. The runner is injectable as `execute_run(..., run_suite=)`, because tests must not run a live `just`.
+
+## Run loop — worktree bootstrap (CBN-EPIC-450.3)
+
+A fresh `wt-<ID>` worktree (CBN-EPIC-450.2) is a clean checkout and holds nothing `.gitignore` covers. Without `.venv` and `node_modules`, the CBN-420 baseline goes red on missing dependencies rather than on the code. CBN-EPIC-450.1 weighed three answers, and the operator chose an **explicit per-project command**:
+
+- **Copy or link the main checkout's ignored trees** — rejected. A shared `node_modules` or `.venv` is mutable state two checkouts would race on. An ignored path may also be a secret (`.env`, credentials), and copying it widens where it lives.
+- **Infer installs from the package managers present** (`uv.lock` → `uv sync`, `package-lock.json` → `npm ci`) — rejected. It guesses at commands with network and write effects, and it misses a repo whose setup is anything else.
+- **A registered argv** (chosen) — `register --bootstrap "just setup"`. Fleet justfiles already carry `setup`, so this is usually one flag. The CLI splits the value with `shlex` and the loop runs it with no shell, the suite verbs' posture (CBN-174): what runs is exactly the stored argv. The ceiling is `bootstrap_timeout`, defaulting to 600 s, which covers a cold `uv sync` plus `npm install` on a slow network. The argv and its timeout move as a unit on re-register, like the provider pin and its model.
+
+**Order and refusals.** Readiness runs worktree start → bootstrap at the execution root → strict porcelain read of the whole worktree → baseline at the execution root. A bootstrap that exits nonzero, times out (its process group is killed), or cannot start refuses. So does any non-ignored change it leaves, such as a rewritten lockfile, because the worker would start on a tree that is not the base commit. The refusal names the retained branch and worktree, and nothing retries or removes them; recovery guidance is CBN-EPIC-450.6's. Raw bootstrap output is the log body (`BootstrapResult.render`) for the caller to save, never part of the refusal text, which follows the report-surface deny-list. **No bootstrap configured skips only the command:** the dirt read and the baseline still run, so a suite that cannot prepare itself refuses at the baseline instead of passing as unmeasured.
+
+**The suite runner's bound.** CBN-174 accepts only registered paths, and a worktree path is never registered. `worktree.origin` maps a path inside a linked worktree at exactly `<landing>-worktrees/wt-<ID>/` back to the same subpath of the main checkout, and the runner accepts it when that path is registered. Any other linked worktree, and any worktree of an unregistered project, still refuses. The mapping reads git (`repo_identity`), and an unreadable git maps to nothing, which is a refusal. A hand-made worktree at that reserved path is admitted too. That is the reading `worktree.collision` already gives it, since the path is caobunga's dispatch convention, and since CBN-258 retired the MCP `code_suite` grant the runner has no caller outside the loop's own suite steps.
+
+**No secrets in the argv.** The argv is stored in plain text in `projects/<id>.yaml`, and the read-only status API serves it with the other registry fields, as the operator chose. `register --help` says never to put a secret in it. A bootstrap that needs a credential should read it from the environment it inherits.
+
+**Wired at CBN-EPIC-450.4.** The loop runs this readiness for a record with `isolate` set (next section).
+
+## Run loop — isolated run and fast-forward landing (CBN-EPIC-450.4)
+
+`CONTRACT.md` §"Run loop" → "Isolated dispatch". CBN-EPIC-450.2 shipped the worktree start and CBN-EPIC-450.3 the bootstrap readiness. This child is where the loop uses them, so a headless worker never writes into the checkout the operator works in.
+
+**Opt-in, not default.** When this child started, none of the 25 registered projects had a `bootstrap`. A cold worktree with no `node_modules` or `.venv` would go red at the baseline, so a default switch would have refused the whole fleet at once. The operator chose a per-record `isolate` flag (`register --isolate` / `--no-isolate`; re-register without either keeps it). Unflagged records dispatch exactly as before, and the existing loop tests run unchanged. The epic's audit kept it opt-in (§"Run loop — isolated dispatch audit (CBN-EPIC-450.N)").
+
+**One root swap.** `_run_gated` already threads one `root` through launch, the close wait, settle, the suite, reinspection and the tree refresh. On an isolated record that root becomes the worktree's execution root after readiness, so `launch_until_close`, `_should_repick` and `_failed_from_worker` read the worktree with no new parameters. That includes the CBN-213 pivot: a usage-limit refusal re-picks only when the *worktree* is clean at an unmoved HEAD. The registered path still identifies the project and keys the run lock. The main checkout is read for the operator-presence gate before the worktree exists, and again only to land. The post-baseline `_ready_head` re-read is skipped on this path: the worktree's start SHA is its base, and main moving is the landing check's to catch.
+
+**What lands.** Only a verified closure: outcome `closed`, no escalation, a green suite at the final HEAD, and a porcelain-clean worktree. The operator chose `closed` only. A de-scoped or no-tasknote close already stops a drain with "inspect before approving", and landing it first would put on main the commit the operator was asked to inspect. Parks never land: they run no suite (CBN-443).
+
+**Measured SHA is the landed SHA.** `settle_and_measure` reads the worktree HEAD just before the suite. Once the worker is stopped and the close re-read (CBN-352, CBN-356), the loop reads HEAD again. If it moved, as with a worker still writing a `## Completed` rotation during the suite, the suite runs again at the final HEAD, and that result goes on the record. The commit offered to land is that final HEAD, and the landing re-checks it.
+
+**Landing (`landing.land`).** Every read is strict. The worktree must be at the measured SHA and clean, main must be clean and still at the base, and the SHA must descend from the base. Then `git merge --ff-only <sha>` runs in main, landing that exact SHA rather than whatever the branch name points at, and main's HEAD is re-read afterwards. Any "no" comes back as a reason, not an exception, so the record and card still write. The loop then stops `landing` (on gated and drains alike) with the reason in `detail`. The record stays `closed`; record-level landing state is CBN-EPIC-450.6's. A new stop reason was chosen over reusing `outcome`, which would then have meant two different things.
+
+**Cleanup (`landing.cleanup`).** A worktree is removed only once landed, clean, and at a SHA main contains. `git worktree remove` needs `--force` when initialized submodules are present, and it is safe once porcelain is empty: what it drops is ignored output. The branch is then deleted with the safe `branch -d`. A cleanup failure keeps the landing and adds a recovery step with the commands.
+
+**Retained, never discarded.** From the moment a worktree exists it is on the invocation trace. Any stop that leaves it (a readiness refusal, a failure, a park, an unlanded close, an interrupt) gets a recovery step naming the branch, the path, the `merge --ff-only` command, and the removal commands. The receipt's `head_sha`, `tree` and tasknote are read from the worktree, so a failure that committed there is not reported as "nothing ran". A retained branch blocks that id at the next start (CBN-EPIC-450.2's collision rule). A readiness refusal adds stage `worktree`, which has its own recovery text, so a failed bootstrap does not read as a red baseline.
+
+**Isolated parks hold.** Until CBN-EPIC-450.5 teaches the drain to step past a retained park, any isolated park holds the repo and names the retained worktree. Non-isolated projects keep CBN-443's `park_hold`. (Superseded by CBN-EPIC-450.5, below.)
+
+**Room in CONTRACT.** The budget was full, so three clauses moved here. Two went to the sections above: the CBN-316 detail (usage-limit) and the CBN-272 receipt note (drain exit reasons). The third is CBN-436's: a worker that filed a PLAN row and then died still filed it, so the failure record's `new_rows` lets the next dirty-tree refusal name that filing (CBN-435).
+
+**Review round 1.**
+- *A green close main does not get always stops.* `landing` covers any green closure that did not land: a de-scoped or no-tasknote close, an unreadable worktree HEAD, or a refused fast-forward. Without that, a gated de-scope reported "one-task scope finished" while main lacked the commit. A close whose suite is not green stops `suite` on both tiers, never `landing`.
+- *The candidate's own uncommitted note refuses.* The operator-presence gate exempts it so a stranded run can resume in place (CBN-109). A worktree starts from HEAD and would not carry it, and main's dirt would then refuse the landing too. So `worktree` readiness first refuses any main dirt.
+- *Main must still be on its branch.* `merge --ff-only` advances whatever is checked out. The branch ref is read when the worktree starts, and `land` refuses a switch, or a main that was detached from the start.
+- *Submodules follow the landing.* A fast-forward moves the superproject only. A closure that bumped `.flaitron/core` would leave main dirty at the old pin, so `submodule update` runs after the merge. It has no `--init`, so a submodule main left uninitialized stays that way. If it fails, the landing stands and the receipt gives the command to run.
+- Recovery's removal command uses `branch -d`. `-D` is named only as a deliberate discard.
+
+**Review round 2.**
+- *Baseline dirt refuses.* The in-place path re-runs the presence gate after the baseline. The isolated path skips that, because the worktree's start SHA is fixed. So a strict worktree porcelain read runs instead. Without it, a suite that writes non-ignored output would hand the worker a dirty tree and make every green close unlandable.
+- *A hang mid-merge says main may have moved.* `land` raises only before the merge. A hang during the merge, or on the HEAD read after it, comes back as a reason that tells the operator to check main's HEAD. The retained step says "Caobunga did not land it" rather than "main was not changed".
+- *Cheaper refusals.* A green de-scoped, no-tasknote, or escalated close sets its unlanded reason before any re-measure, so a close that cannot land never runs a second suite.
+- Declined: removing the empty worktree a red baseline leaves. CBN-EPIC-450.2/.3's rule is retain, never discard. The recovery step gives the commands. Whether a provably empty, never-launched worktree may be removed automatically is a question for CBN-EPIC-450.6 or the audit. The audit kept retain-never-discard (§"Run loop — isolated dispatch audit (CBN-EPIC-450.N)").
+
+**Review round 3** (notes only).
+- A detached main refuses at `worktree` readiness, before the start. It used to be found only at landing, after a full worker session.
+- Dirt left by the baseline stops under `worktree`, not `baseline`, because the suite passed.
+- A closure with no measured suite is unlanded. The record model already requires one, so this is a guard.
+- Before its `--force` removal, `cleanup` reads worktree dirt with `--ignore-submodules=none`, so a submodule configured `ignore = dirty` cannot hide edits from it. Recovery's removal command now says to check `git status` first.
+- Deferred to CBN-EPIC-450.6: a SIGKILLed isolated run's stale-receipt reconcile cannot name the worktree, because the receipt does not persist it yet. That persistence is .6's scope ("Persist execution path, branch, and landing state"). Done in CBN-EPIC-450.6: the receipt's `worktrees` entry names it, and the reconcile reads its evidence there.
+- Declined, as in rounds 1 and 2: dropping `land`'s ancestry pre-check. It costs one git call and names a refusal more clearly than `--ff-only`'s.
+
+## Run loop — isolated park and continue (CBN-EPIC-450.5)
+
+CBN-EPIC-450.4 left every isolated park holding the drain. Holding was safe, but it was also unnecessary: a park's commits and any dirt it leaves stay on its `wt-<ID>` branch and worktree, and main never gets them. It also left a second gap. The parked note never reaches main, so main's next read would pick the parked row again, and `worktree.start` would then refuse it on collision.
+
+**Retained work is read from git, per pick.** `worktree.retained_ids` lists every id `collision` would refuse: a `wt-<ID>` branch, a worktree git still registers at a `wt-<ID>` path, or a `wt-<ID>` directory. The loop reads it before every pick on an isolated record, and `read_project(retained=…)` denies those ids `retained`. Reading from git rather than from a stored list means a restart, a crashed run's branch-only orphan and this invocation's own park are the same case, and no second task database exists. Every read is strict: a branch or worktree list git will not give, or an unlistable worktrees directory, refuses under stage `worktree`, so "could not tell" never passes for "nothing retained". Why it was left (park, unlanded close, failed readiness, interrupt, or an operator's own attended `wt-<ID>`) does not matter, which makes an unknown outcome fail closed by construction.
+
+**Dependents need no new rule.** The parked row stays open on main, so `blocked` still denies a row `Blocked by` it (even a satisfied clause denies until it is removed), and `audit` still denies its epic's audits. This is the same reasoning as CBN-443's "Which rows a park gates".
+
+**The dimension's place.** `retained` is checked first among the launching-tier dimensions, ahead of `parked`, because the branch may hold the only copy of the work and nothing on main clears it. The `selection` module takes plain ids and never reads git, so the Fleet boundary holds. Attended reads ignore the dimension. The loop's own read threads the ids into `coverage` too, so a run record's `marked_tasks` never counts a retained row. A row retained at the first read is also kept out of the drain pin (`_marked_ids`), because a worker in a linked worktree shares the repo's refs and could delete the branch mid-drain. The report surfaces (`caobunga status`, the Status API's `launch_pick`, `observe`'s eligibility echo, a record's `next_task`) did not read retained ids at first; CBN-EPIC-450.6 threaded them through (§"Run loop — landing state and recovery reports (CBN-EPIC-450.6)").
+
+**What still holds the drain.** Only main itself (`presence.main_hold`): main unreadable or dirty holds, with `— repo held: …` on the detail as before. The operator chose to let a main `HEAD` that moved during the park (an operator commit) continue and not hold. The next dispatch re-runs the baseline on its fresh worktree instead, because the trace's `green_sha` (the baseline's `start_sha`, then each landed closure's final SHA) no longer matches main. A red re-measured baseline stops `baseline` as usual. Non-isolated projects keep `measure_baseline` on the first dispatch only, and CBN-443's `park_hold` is unchanged.
+
+**Scope.** The operator chose to read retained ids for isolated projects only. A project switched from `isolate` back to in-place dispatch would not see its leftover `wt-<ID>` branches. The CBN-EPIC-450.N audit decides whether that, or flaitron's attended `wt-<ID>` convention on non-isolated projects, warrants reading them everywhere. The audit kept isolated-only (§"Run loop — isolated dispatch audit (CBN-EPIC-450.N)").
+
+**Receipts.** A drain that continued past an isolated park still ends `incomplete`, `successful: false`: the retained row is a marked denial, so it stays in `authorized_tasks` and `remaining_tasks`. Before each pick, the previous task's still-set worktree moves from the trace onto the receipt's recovery list (`InvocationTrace.retire_worktree`), so a later task cannot displace it, and every worktree left in one invocation gets its own step. The `landing` stop is unchanged within an invocation; a later invocation denies that id and drains the rest.
+
+**Room in CONTRACT.** The budget was full, so four clauses left CONTRACT, each restating a decisions note: the CBN-443 "renames split" clause and park-commit attribution (§"Run loop — park and continue (CBN-443)", "Review hardening" and "Late park commit"), and CBN-252's exit 3 / exit 2 detail (`decisions/flaitron-reader.md` §"Marker coverage — parked note and the dirt gate (CBN-252)"). The `parked` ordering rationale moved to `decisions/flaitron-reader.md` §"Marker coverage — `retained` dimension (CBN-EPIC-450.5)".
+
+## Run loop — landing state and recovery reports (CBN-EPIC-450.6)
+
+CBN-EPIC-450.4 and .5 kept an isolated run's location and landing only in the receipt's recovery prose. The run record still said `closed` for a closure main never got, a SIGKILLed run's receipt could not name its worktree, and every report predicted rows the drain denies.
+
+**Closure is not landing.** A run record's `outcome` stays the task's own result. The optional `worktree` field (`WorktreeRun`) says where it ran and whether main got it. It is `landed` when its branch fast-forwarded main, with `landed_sha`, and `detail` naming a worktree not removed or submodules not updated. It is `unlanded` when the outcome is a closure but main lacks it, with `detail` giving the landing refusal or `its suite was red`. Otherwise it is `retained`: a park or a failure, which is never a landing candidate. The state is derived at `finish` from what the trace already knew: a cleared `trace.worktree` after `_land`, `trace.unlanded`, and the outcome. Nothing new is decided at write time. Stats still count an unlanded `closed` as closed, because the task did close. The reports tag it `not landed` instead: the fleet outcome cell, the digest bullet, and the last-run card.
+
+**The receipt names the live worktree.** `InvocationResult.worktrees` gets one entry per started worktree, checkpointed at start with `landing: null`. The entry is settled `landed` and checkpointed the moment main is fast-forwarded, so a run that dies between the landing and its record write never reads as unlanded work. Every other entry is settled at the record write or at retirement (a refusal after start, a raise). `reconcile_stale` reads a dead run's still-open entry, which by construction never landed. It is settled `retained` and gets the retained recovery step, even when the directory was removed by hand, since the branch may hold the only copy. While the worktree is on disk, its execution root is where the snapshot (HEAD, tree, tasknote) and the landed commit list come from, and the detail says `Landed on wt-<ID>`. Once the directory is gone, those reads fall back to main. `stale_receipts` reads the same root, so `status`, the digest and the API agree with the rewrite.
+
+**Reports agree with the drain.** `retained.report_retained` reads `worktree.retained_ids` for an isolated record, the drain's own scope. It degrades to `None` instead of refusing, because a report never stops on git. `try_read_project`, `launch_pick` and `read_tree` take the ids, so coverage denials, the tree candidate and the API's `tree.candidate` skip them. `observe`'s per-task eligibility echo denies them too. Its `next:` line stays the attended pick, where the launching-tier `retained` dimension never applied. The record's `next_task` gets the pick's ids through `Posture.retained`, down `wait_for_close`, `inspect_close` and `reinspect_settled` to `dispatchable`. A suggested next row on a retained branch is therefore no longer published.
+
+**Listing and recovery.** `retained.retained_worktrees` joins each id with the newest run record whose `worktree.branch` names it. It trusts that record only when the branch's reflog shows it was created at the record's `base_sha` (`worktree.started_at`). Without a reflog it falls back to the base being an ancestor of the branch, which keeps a real record's guidance but cannot catch a re-created branch. Otherwise the record belongs to an earlier branch of the same name that was since removed, and the entry gets the orphan recovery step. `status <id>` prints a `retained:` block with each entry's full recovery step. Fleet `status` prints a one-line footer per project, the digest a `**retained**` bullet, and the API detail `retained_worktrees` (`null` when unreadable). A project that does not isolate prints nothing.
+
+**Attended recovery, by case.** Caobunga never removes, lands, rebases or resumes a retained worktree. The recovery text names the commands, and the operator runs them.
+- *Failed setup* (bootstrap failure, red baseline, readiness dirt). No worker ran, so the branch sits at its base. Read the receipt's detail and the bootstrap or suite log, and fix the cause (often `caobunga register --bootstrap`). Then remove it: `git -C <main> worktree remove --force <wt>` and `git -C <main> branch -d wt-<ID>`, then rerun.
+- *Dirty or committed park.* The parked note, and any work, is only on the branch. Resume attended in the worktree (`/ft-task <ID>` there), or carry the work to main and resume it there. Remove the worktree once the work is saved. The drain keeps denying the id, and anything `Blocked by` it, until the branch is gone.
+- *Unlanded close.* The closure is real but only on its branch. With main clean and still at the base, `git -C <main> merge --ff-only wt-<ID>` lands it. Otherwise integrate it attended (rebase or merge, then re-run the suite). Then remove the worktree and the branch.
+- *Orphan branch* (no record names it: a crashed run, a refusal before launch, or a branch made by hand). Inspect `git log wt-<ID>` and the directory if it exists. Save any work, then remove it, with `git worktree prune` when the directory is already gone. Use `-D` only to discard unlanded work deliberately.
+
+Whether a provably never-launched worktree may be removed automatically was left to the CBN-EPIC-450.N audit, which kept retain-never-discard (§"Run loop — isolated dispatch audit (CBN-EPIC-450.N)").
+
+**Room in CONTRACT.** The four `hermes_*` run-record rows restated §"Hermes review", so they became pointers. Their full text moved verbatim to `decisions/registry-run-record.md` §"Hermes review — retire verdict (CBN-242, CBN-258)".
+
+## Run loop — isolated dispatch audit (CBN-EPIC-450.N)
+
+The epic's audit read the six children against each other and decided the four questions they had left open. The operator chose each, on 2026-11-01:
+
+- **`isolate` stays opt-in.** No registered project sets `isolate` or `bootstrap`, and no isolated dispatch has run against a real repo; the path is verified by the real-git tests only. A default switch would start every project in a cold worktree with no bootstrap, and its baseline would go red. Opting a project in (`register <path> --isolate --bootstrap "just setup"`) is the operator's deliberate act.
+- **Retain, never discard, holds for never-launched worktrees too.** A failed bootstrap or red baseline leaves a worktree at its base; the drain denies the row and `status <id>` prints the removal commands. No code path removes it.
+- **Retained ids are read on isolated projects only.** A non-isolated drain does not see `wt-<ID>` branches, so an attended flaitron worktree on a non-isolated project is not protected from a headless pick of the same row. Accepted: no fleet repo had a `wt-*` branch at audit time, and the attended convention is opt-in.
+- **`retained` stays an explicit keyword.** Carrying it on `ProjectRead` or the pick posture (CBN-EPIC-450.6 review, twice) was declined: the threading matches `unattended` / `drain`, and the move would be a refactor with no behavior change.
+
+## Run loop — TTY styling at the echo seam (CBN-EPIC-449.4)
+
+`caobunga run` styles its echo lines in one place: `echo_style.run_echo()` wraps `click.echo` in `cli.run`, and everything else (`loop.py`, `wait.py`, the formatters) still emits plain `<word>: …` text. Styling needs an interactive stdout, a `NO_COLOR` that is unset or empty (no-color.org), and a `TERM` other than `dumb`. Otherwise `run_echo()` returns `click.echo` itself, so the output of `fleet` children, the `/caobunga` skill, and tests is byte-identical to the unstyled output by construction, not by stripping. The run-record dump body stays plain; only its `run:` header passes through the seam.
+
+- **Prefix plus verdict word, not prefix alone.** `eligibility:`, `bootstrap:`, `landing:`, `suite:` / `baseline:`, `drain:`, `invocation:`, `card:`, `rollup:`, and `retained:` each carry both good and bad lines. A small per-prefix rule list reads the token right after the prefix, and the first match wins. That way `eligibility: X deny` is yellow and `allow withdrawn` is red, not the same color as `allow`. The rules depend on verdict tokens (`StopReason` / `InvocationStatus` / suite verdict values, `allow` / `deny`), and `test_echo_style` pins those tokens to their enums, so a rename fails a test rather than silently falling back to the prefix's default tone. An `outcome` drain stop that parked or de-scoped is yellow, like the `parked:` line beside it; `failed` stays red.
+- **Only the emoji and the prefix word are colored.** The rest of the line stays in the default color, so long `drain:` / `invocation:` lines stay readable. Info lines (`phase:`, `worktree:`, record paths) get an emoji and no color.
+- **An unknown prefix passes through untouched at runtime.** `test_echo_style` scans the run-path modules' `echo(` / `say(` literals, so a new run-path prefix without a `STYLES` row fails the suite instead of printing plain.
+
+## Worker interface — one-shot exit rationale (CBN-460)
+
+Context relocated from CONTRACT; current rules remain there. Unlinked section references and positional wording refer to the original CONTRACT context.
+
+`exited` is how a one-shot CLI reports finishing: it can exit 0 having closed
+nothing, and without this status the loop would poll until `CAOBUNGA_RUN_TIMEOUT`
+(default 7200s) before escalating. A persistent session could never report it
+([decisions/worker-run-loop.md](worker-run-loop.md) §"Worker interface — the retired `cao` adapter").
+
+## Continue prompt — recipe and conversion choices (CBN-460)
+
+Context relocated from CONTRACT; current rules remain there. Unlinked section references and positional wording refer to the original CONTRACT context.
+
+The unattended variant states the park action inline and then **points at** the
+target's own fragment rather than restating Flaitron's recipe. The degraded
+variant points at nothing; it names the posture that pin does honor. Why:
+[decisions/worker-run-loop.md](worker-run-loop.md) §"Continue prompt — point, don't restate".
+
+Caobunga takes the prose-continue path (flaitron `docs/EXTERNAL-AGENTS.md`
+step 6, path (b)) over the frontmatter-conversion one; both are contract-legal,
+and path (a) would stop the run rather than resume it ([decisions/worker-run-loop.md](worker-run-loop.md) §"Continue prompt — prose continue over frontmatter conversion").
+
+## Run loop — committed closure rationale (CBN-460)
+
+Context relocated from CONTRACT; current rules remain there. Unlinked section references and positional wording refer to the original CONTRACT context.
+
+Close detection is the worker repo, never a terminal transcript. Steps 1-3 read
+`HEAD`'s **committed tree** — `git show HEAD:.flaitron/PLAN.md`, `git ls-tree`
+for the archive — never the checkout (CBN-158), so the two writes of an atomic
+single-commit closure (§"Paper-complete guard") are only ever observed together
+and `no-tasknote` means "`HEAD` has the row completed and no archived note"
+([decisions/worker-run-loop.md](worker-run-loop.md) §"Run loop — close detection reads `HEAD` (CBN-158)"). The open-note check in steps 4-5 stays a checkout
+read — a park is inherently uncommitted, so there is nothing at `HEAD` to read.
+
+## Run loop — deterministic-suite composition and serialization rationale (CBN-460)
+
+Context relocated from CONTRACT; current rules remain there. Unlinked section references and positional wording refer to the original CONTRACT context.
+
+**Deterministic suite (CBN-EPIC-202.3).** After the settle, on **every launching tier** — `gated` included; only the *continue* is `proceed-on-green`'s (CBN-EPIC-202.4) — and only when the close carries a closure commit (`closed` / `de-scoped` / `no-tasknote`; a park or a failure left nothing closed to measure, and §"Suite" forbids the field there), the loop runs the three fleet verbs against the tree the worker just closed: `just test`, `just lint`, `just typecheck`, in that fixed order, each under `suite_verbs.TIMEOUTS` (600 / 120 / 300 s). They are the fleet's verbs, so a `just`-less or `justfile`-less target is a `refused` result rather than a skipped step ([decisions/worker-run-loop.md](worker-run-loop.md) §"Run loop — suite verbs and the `refused` stop (CBN-EPIC-202.3, CBN-EPIC-202.4)"). `suite.run_suite` composes `suite_verbs.run_verb` by call, not by copy (its spawn bounds: [decisions/worker-run-loop.md](worker-run-loop.md) §"Run loop — suite spawn bounds and record timing (CBN-174, CBN-EPIC-314.2)"), and **never raises**: a refusal, a timeout, or a spawn error is a `refused` / `timeout` entry for that verb (CBN-171's posture for loop-side steps), folded by `models.Suite.fold` into the one `verdict` a gate reads. The result rides the **single** record write as `suite` (§"Suite"), so `closed_at` lands after it. The full rendered output is saved under `suites/` (§"On-disk layout") after the write, under the record's stamp; the loop echoes one `suite: {verdict} — test {exit} {s}s · lint … · typecheck …` line — echo-only, like `foreign:`, since the record already carries every fact. **Serialized across slugs (CBN-308):** `run_suite` holds `suite.lock` around each verb's spawn, so a concurrent slug's verb waits rather than overlapping; the wait is outside every verb's duration and ceiling, and a home whose filesystem cannot `flock` runs the suite unserialized rather than raise. **The wait is echoed and a refusal never queues (CBN-310):** a verb that blocks on the lock makes the loop echo `suite: waiting for suite.lock` before it does, and the lock is taken only after the refusal check, so a `just`-less or `justfile`-less target returns its `refused` result at once instead of waiting behind another slug's suite. Why this over a rerun-on-red: [decisions/worker-run-loop.md](worker-run-loop.md) §"Run loop — suites serialized across slugs (CBN-308)". The worker's own Phase 3 run is not this step's evidence ([decisions/worker-run-loop.md](worker-run-loop.md) §"Run loop — suite timing shift and worker-evidence incidents (CBN-167, CBN-171)").
+
+## Worker interface — protocol-field rationale (CBN-460)
+
+Context relocated from CONTRACT; current rules remain there. Unlinked section references and positional wording refer to the original CONTRACT context.
+
+**Accept-and-ignore fields.** The Protocol declares every field the loop has
+(`effort` and `log_path` included), and an adapter that cannot carry one accepts
+and ignores it rather than raising — the Protocol never forks into two shapes, and
+a future adapter inherits the same contract. Why: [decisions/worker-run-loop.md](worker-run-loop.md) §"Worker interface — why accept-and-ignore fields".
+
+## Worker interface — minimal protocol rationale (CBN-460)
+
+Context relocated from CONTRACT; current rules remain there. Unlinked section references and positional wording refer to the original CONTRACT context.
+
+The Protocol declares exactly what `loop.execute_run` calls, and nothing an adapter
+keeps for its own convenience — an adapter that never needs such a helper
+implements nothing dead.

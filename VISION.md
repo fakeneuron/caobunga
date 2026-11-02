@@ -17,15 +17,15 @@ That loop does not scale across a fleet of registered repos under `~/code`.
 
 ## What it is
 
-A Python/uv CLI plus a later status dashboard that:
+A Python/uv CLI plus a status dashboard that:
 
 1. **Registers** approved repos explicitly (no auto-adoption in v1).
 2. **Reads** each repo’s Flaitron plan and open tasknotes.
 3. **Routes** the next task to a platform + model using Flaitron’s task-level categories and best-effort leftover usage on available CLIs — no CLI exposes a safe non-interactive usage dump today, so ranking degrades to installed order (declared order under a registry allow-list; see [docs/CONTRACT.md](docs/CONTRACT.md) §Picker).
 4. **Executes** through a pluggable worker seam: one fresh isolated session per task (the mechanical `/clear`). One adapter ships — a directly-spawned headless CLI subprocess, selected by `CAOBUNGA_WORKER`; the seam stays a Protocol so another adapter can land without privilege (a `cao` adapter did, and was retired in CBN-204).
 5. **Captures** a standardized closure record when Flaitron’s task ends in a commit and a next-task suggestion. Split (CBN-003): the archived tasknote is the narrative (Goal, Acceptance, Final Summary); Caobunga writes a thin orchestrator-owned run record at 🏁 for SHA, outcome, provider/model, next-task, and the path to that note. Do not add a report section to Flaitron — the SHA does not exist until after archive, and next-task is forbidden in the recap. Field names, tiers, and CLI verbs: [docs/CONTRACT.md](docs/CONTRACT.md).
-6. **Reports** to two surfaces: terminal and a caller-side last-run card (`$CAOBUNGA_HOME/status/{project}.md` — never committed into the repo it reports on).
-7. **Reviews** through the worker's own in-run External review (flaitron `CORE-656`), which caobunga records on the run record rather than re-running (CBN-242 retired the Hermes supervisor that once reviewed each close).
+6. **Reports** to three surfaces: terminal, a caller-side last-run card (`$CAOBUNGA_HOME/status/{project}.md` — never committed into the repo it reports on), and the read-only status dashboard.
+7. **Reviews** through the worker's own in-run External review (flaitron `CORE-656`), which caobunga records on the run record rather than re-running (CBN-242's verdict retired the Hermes supervisor that once reviewed each close; CBN-258 removed it).
 8. **Honors** per-project execution tiers (`observe` → `gated` → `proceed-on-green`).
 
 ## What it is not

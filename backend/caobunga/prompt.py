@@ -18,9 +18,11 @@ from caobunga.flaitron import NextTask
 # The posture sentence appended to the `in-progress` continue prompt (CBN-109).
 # That prompt is prose, not a `/ft-task` invocation, so there is no token to hang
 # the flag on — but the flag was never the point, the posture was, and prose
-# carries a posture fine. The unattended variant states the park action inline
-# and then *points* at the target's own fragment rather than restating flaitron's
-# recipe: `supports_unattended` already proved that file is on disk whenever this
+# carries a posture fine. The unattended variant *points* at the target's own
+# park recipe, naming only the two fields close detection reads, rather than
+# restating flaitron's steps — a list that stopped at "and stop" read as the
+# whole park and skipped the recipe's lone-park commit (CBN-459):
+# `supports_unattended` already proved that file is on disk whenever this
 # variant is sent, and a caobunga-side paraphrase would make a flaitron release a
 # caobunga contract change (CONTRACT §"Fleet boundary"). `{module}` is the path
 # that probe resolved (`unattended_module_rel`), not a literal: a core-less
@@ -28,8 +30,8 @@ from caobunga.flaitron import NextTask
 # the submodule path there, pointing at nothing (CBN-189).
 CONTINUE_UNATTENDED = (
     "Run under the --unattended posture (`{module}`): at any gate "
-    "you cannot answer, park the tasknote — `status: blocked` plus "
-    "`park-reason: <code> — <prose>` — and stop."
+    "you cannot answer, park the tasknote by that file's park recipe — it "
+    "writes `status: blocked` plus `park-reason: <code> — <prose>` — and stop."
 )
 # The degraded twin. A pin that does not recognize `--unattended` ships no
 # `unattended-mode.md` either, so pointing at one would point at nothing; name
@@ -84,11 +86,19 @@ FOREGROUND_ONLY = (
 # does not repair. Only the continue shape named the park shape; the fresh
 # launches leaned on the pinned skill. Static, with no degrade: it asks for
 # `status: blocked` only, the one field every pin's park writes, so a pin
-# without unattended parking is asked for nothing it cannot produce.
+# without unattended parking is asked for nothing it cannot produce. CBN-443's
+# second sentence, asking for the park commit, retired at CBN-446: flaitron
+# v8.1.0's `--unattended` park commits its lone note itself (CORE-843). The
+# second sentence now (CBN-459) covers what that commit cannot: a `status:`
+# fix this cue provokes, after the recipe's commit or with none made. It asks
+# only when the note is the tree's lone change, mirroring the recipe's own
+# condition, and for a new commit, since the recipe forbids amending.
 PARK_CHECK = (
     "Before you end the session, re-read your tasknote: if you parked it, "
     "confirm its frontmatter says `status: blocked` — a `park-reason:` line "
-    "without that status does not park the task."
+    "without that status does not park the task. If you fix it and the note "
+    "is then the tree's only uncommitted change, commit just that note as a "
+    "new commit (never amend)."
 )
 
 # The follow-up cue (CBN-138.2), appended to every prompt shape. CBN-121 built

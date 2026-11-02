@@ -1,136 +1,60 @@
-"""Invocation accounting and recovery; task evidence stays in the run ledger."""
+"""Invocation accounting; recovery text lives in recovery.py, task evidence in the run ledger."""
 
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
-from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+import yaml
+from pydantic import ValidationError
 
 from caobunga.errors import GitUnreadable, UserError
-from caobunga.flaitron import ProjectRead, is_descoped, list_open_tasknotes
-from caobunga.git import DIRT_SAMPLE, commits_since, git_dirt, git_head
+from caobunga.flaitron import ProjectRead, list_open_tasknotes
+from caobunga.git import DIRT_SAMPLE, commits_after, commits_since, git_dirt, git_head
 from caobunga.models import (
     CLOSURE_OUTCOMES,
-    Escalation,
     ExecutionTier,
+    InvocationDenial,
+    InvocationPark,
+    InvocationResult,
+    InvocationStatus,
+    LandingState,
     Outcome,
     RegistryRecord,
     RunRecord,
+    StaleReceipt,
+    StopReason,
+    Suite,
+    SuiteVerdict,
+    WorktreeRun,
     compact_utc,
     utc_now,
 )
+from caobunga.recovery import recovery_steps, registry_changed_recovery, retained_recovery
 from caobunga.suite import suite_stops
-from caobunga.text import read_text_or_none
 
 if TYPE_CHECKING:
     from caobunga.store import Store
+    from caobunga.worktree import WorktreeContext
 
 
-class InvocationStatus(StrEnum):
-    RUNNING = "running"
-    OBSERVED = "observed"
-    COMPLETE = "complete"
-    EMPTY = "empty"
-    REFUSED = "refused"
-    INCOMPLETE = "incomplete"
-    INTERRUPTED = "interrupted"
-    ABANDONED = "abandoned"
-
-
-class InvocationDenial(BaseModel):
-    task_id: str
-    reason: str
-    line: int
-
-
-class InvocationResult(BaseModel):
-    """Separately versioned receipt, including requests with no task record.
-
-    `successful` is for aggregation; `legacy_exit_code` preserves direct-run
-    behavior. A running receipt left by a crash is explicitly not success.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: Literal[1] = 1
-    invocation_id: str
-    receipt_id: str
-    project: str
-    started_at: datetime
-    pid: int | None = None
-    finished_at: datetime | None = None
-    status: InvocationStatus = InvocationStatus.RUNNING
-    stop_reason: str = "running"
-    detail: str = "Invocation has not finished; reconcile committed evidence before resuming."
-    successful: bool = False
-    approved_scope_finished: bool = False
-    legacy_exit_code: int | None = None
-    path: str | None = None
-    tier: ExecutionTier | None = None
-    task_id: str | None = None
-    authorized_tasks: list[str] = Field(default_factory=list)
-    remaining_tasks: list[str] = Field(default_factory=list)
-    run_records: list[str] = Field(default_factory=list)
-    denials: list[InvocationDenial] = Field(default_factory=list)
-    unparsed_lines: list[int] = Field(default_factory=list)
-    provider: str | None = None
-    model: str | None = None
-    escalation_reason: Escalation | None = None
-    last_commit_sha: str | None = None
-    head_sha: str | None = None
-    tree: list[str] | None = None
-    tasknote_path: str | None = None
-    tasknote_status: str | None = None
-    park_reason: str | None = None
-    worker_log: str | None = None
-    suite_log: str | None = None
-    timeout_seconds: float | None = None
-    shutdown: Literal["returned", "failed"] | None = None
-    recovery: list[str] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def _truth_matches_status(self) -> InvocationResult:
-        successful = self.status in {
-            InvocationStatus.COMPLETE,
-            InvocationStatus.EMPTY,
-            InvocationStatus.OBSERVED,
-        }
-        if self.successful != successful:
-            raise ValueError("invocation success does not match its status")
-        if self.approved_scope_finished != (successful and not self.remaining_tasks):
-            raise ValueError("invocation scope completion does not match its evidence")
-        if successful and self.remaining_tasks:
-            raise ValueError("a successful invocation cannot have remaining approved tasks")
-        if self.status is InvocationStatus.ABANDONED:
-            # Found dead by a later run (CBN-376): when it died is known only as
-            # "by now", and its real exit code not at all.
-            if self.finished_at is None or self.legacy_exit_code is not None:
-                raise ValueError("an abandoned invocation has a finish time and no legacy exit")
-            return self
-        terminal = self.status is not InvocationStatus.RUNNING
-        if terminal != (self.finished_at is not None and self.legacy_exit_code is not None):
-            raise ValueError("invocation terminal status requires finish time and legacy exit")
-        return self
-
-
-def _snapshot(result: InvocationResult, last: RunRecord | None) -> None:
+def _snapshot(result: InvocationResult, last: RunRecord | None, root: Path | None = None) -> None:
     """Fill the receipt's repo evidence: HEAD, tree, open tasknote, live log pointers.
 
     Shared by a finishing trace and a stale receipt's reconcile (CBN-376).
+    `root` overrides the registered path: a retained isolated worktree's
+    execution root is where the run's evidence is (CBN-EPIC-450.4).
     """
     if result.path is None:
         return
-    root = Path(result.path)
+    root = root or Path(result.path)
     # The refusal already waited on this repo's git; re-reading it here would
     # wait `GIT_TIMEOUT` twice more for the same "unknown" (CBN-320).
-    if result.stop_reason == "git-unreadable":
+    if result.stop_reason == StopReason.GIT_UNREADABLE:
         result.head_sha = None
         result.tree = None
     else:
@@ -152,6 +76,13 @@ def _snapshot(result: InvocationResult, last: RunRecord | None) -> None:
         value = getattr(result, key)
         if value is not None and not Path(value).is_file():
             setattr(result, key, None)
+
+
+def _suite_detail(suite: Suite | None) -> str | None:
+    """Why a closure was never offered to land, when its suite says so."""
+    if suite is None or suite.verdict is SuiteVerdict.GREEN:
+        return None
+    return f"its suite was {suite.verdict.value}"
 
 
 def closed_green(run: RunRecord) -> bool:
@@ -176,6 +107,26 @@ class InvocationTrace:
     start_sha: str | None = None
     completed: set[str] = field(default_factory=set)
     failed_shutdowns: list[str] = field(default_factory=list)
+    # Registry names changed by a run that raised after launch (CBN-428); a
+    # normal return names them on its task record instead.
+    registry_changed: list[str] = field(default_factory=list)
+    # The current task's isolated worktree (CBN-EPIC-450.4), from its start
+    # until it lands and is removed; still set at `finish`, it is retained.
+    worktree: WorktreeContext | None = None
+    # Why the current task's green closure did not land, when it did not, and
+    # the branch main had checked out when its worktree started.
+    unlanded: str | None = None
+    landing_ref: str | None = None
+    # Recovery for worktrees an earlier task in this invocation left behind.
+    retained: list[str] = field(default_factory=list)
+    # The main `HEAD` a suite last measured green: the baseline's, then each
+    # landed closure's. An isolated dispatch from any other `HEAD` re-measures
+    # its baseline (CBN-EPIC-450.5).
+    green_sha: str | None = None
+    # The current task's receipt entry (CBN-EPIC-450.6). Settled `landed` and
+    # checkpointed the moment main is fast-forwarded, so a run that dies before
+    # its record is written never reads as holding unlanded work.
+    _entry: WorktreeRun | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         now = utc_now()
@@ -236,11 +187,101 @@ class InvocationTrace:
         if closed_green(run):
             self.completed.add(run.task_id)
         result.remaining_tasks = [t for t in result.authorized_tasks if t not in self.completed]
+        for park in result.parked:
+            if park.held is None:
+                park.continued_with.append(run.task_id)
         self.checkpoint()
+
+    def record_park(self, run: RunRecord, held: str | None, *, descoped: bool) -> None:
+        """A drain's park, and whether it held the repo (CBN-443); later runs extend it."""
+        self.result.parked.append(
+            InvocationPark(
+                task_id=run.task_id,
+                park_reason=run.park_reason,
+                park_prose=run.park_prose,
+                held=held,
+                descoped=descoped,
+            )
+        )
+        self.checkpoint()
+
+    def start_worktree(self, context: WorktreeContext) -> None:
+        """Put a just-started worktree on the trace and the receipt (CBN-EPIC-450.6).
+
+        Checkpointed at once, so a receipt the orchestrator never finishes still
+        names the worktree holding its task's work.
+        """
+        self.worktree = context
+        self._entry = WorktreeRun(
+            branch=context.branch,
+            worker_root=str(context.worker_root),
+            execution_root=str(context.execution_root),
+            landing_root=str(context.landing_root),
+            base_sha=context.base_sha,
+        )
+        self.result.worktrees.append(self._entry)
+        self.checkpoint()
+
+    def mark_landed(self, sha: str) -> None:
+        """Main now holds the current task's branch at `sha`; checkpoint at once."""
+        if self._entry is None:
+            return
+        self._entry.landing = LandingState.LANDED
+        self._entry.landed_sha = sha
+        self.checkpoint()
+
+    def note_landing(self, detail: str) -> None:
+        """What a landing left behind (a worktree not removed, submodules not updated)."""
+        if self._entry is None:
+            return
+        self._entry.detail = "; ".join(part for part in (self._entry.detail, detail) if part)
+        self.checkpoint()
+
+    def settle_worktree(self, outcome: Outcome, suite: Suite | None) -> WorktreeRun | None:
+        """The current task's final worktree state, also set on its receipt entry.
+
+        Landed when its branch fast-forwarded main. Otherwise a closure is
+        `unlanded`: its outcome is a close main does not have. Anything else is
+        `retained`. `None` when this task started no worktree.
+        """
+        entry = self._entry
+        if entry is None:
+            return None
+        if entry.landing is None and outcome in CLOSURE_OUTCOMES:
+            entry.landing = LandingState.UNLANDED
+            entry.detail = self.unlanded or _suite_detail(suite)
+        elif entry.landing is None:
+            entry.landing = LandingState.RETAINED
+        return entry.model_copy()
+
+    def retire_worktree(self) -> None:
+        """Move a retained worktree onto the recovery list and off the trace (CBN-EPIC-450.5).
+
+        Called before the next task's read, so a drain that continued past an
+        isolated park names every worktree it left, and at `finish`. A receipt
+        entry no run record settled (a refusal before launch, a raise) is
+        settled `retained` here; a landed one already says so.
+        """
+        if self._entry is not None and self._entry.landing is None:
+            self._entry.landing = LandingState.RETAINED
+        self._entry = None
+        context = self.worktree
+        if context is None:
+            return
+        self.retained.append(
+            retained_recovery(
+                branch=context.branch,
+                worker_root=str(context.worker_root),
+                landing_root=str(context.landing_root),
+                base_sha=context.base_sha,
+            )
+        )
+        self.worktree = None
 
     def snapshot(self) -> None:
         """Best-effort diagnostics cannot replace the execution's stop reason."""
-        _snapshot(self.result, self.last)
+        root = self.worktree.execution_root if self.worktree is not None else None
+        _snapshot(self.result, self.last, root)
 
     def finish(self, *, exit_code: int) -> InvocationResult:
         result = self.result
@@ -268,6 +309,10 @@ class InvocationTrace:
                 result.head_sha = None
                 result.tree = None
         result.recovery = recovery_steps(result, self.last, self.start_sha)
+        if self.registry_changed:
+            result.recovery.append(registry_changed_recovery(self.registry_changed))
+        self.retire_worktree()
+        result.recovery.extend(self.retained)
         if self.failed_shutdowns:
             result.recovery.append(
                 "Inspect and stop sessions with failed shutdowns: "
@@ -276,176 +321,6 @@ class InvocationTrace:
             )
         self.checkpoint()
         return result
-
-
-_RECOVERY = {
-    "active-run": (
-        "Wait for the active run to finish; inspect its invocation and logs before rerunning."
-    ),
-    "dirty-tree": (
-        "Inspect the listed changes and open tasknote; preserve partial work and resolve it "
-        "attended before rerunning from a ready tree."
-    ),
-    "provider": (
-        "Check the named provider/model, CLI installation, authentication and model access; "
-        "inspect the diagnostic pointer before rerunning from a ready tree."
-    ),
-    "suite": (
-        "Keep the real closure commit. Fix the failing, timed-out or refused suite verbs and "
-        "rerun just test, just lint and just typecheck to green before authorizing continuation; "
-        "do not rewrite the historical run record."
-    ),
-    "unpinned": (
-        "Review who changed the deferred row and its approval before a new invocation pins it; "
-        "do not automatically relaunch it."
-    ),
-    "git-unreadable": (
-        "Check that git is installed and that no hung git process holds the target repo; "
-        "rerun once git answers there."
-    ),
-    "not-a-repo": (
-        "Run git rev-parse HEAD in the registered path: it must be a repository git may read "
-        "(ownership, safe.directory, permissions) with at least one commit. Fix that, or "
-        "re-register the project at its checkout, then rerun."
-    ),
-    "head-lost": (
-        "HEAD became unreadable after the worker launched. Run git rev-parse HEAD in the "
-        "registered path, check for a still-running worker process, and inspect the tree and "
-        "tasknote for the worker's partial work before restoring the repository; do not "
-        "rerun until HEAD is readable again."
-    ),
-    "interrupted": (
-        "Inspect the invocation's task records, actual commits, partial work and live processes; "
-        "reconcile closure evidence and restore readiness before resuming. "
-        "Repair the reporting/storage error if present."
-    ),
-    "process-gone": (
-        "The orchestrator died without writing its receipt (an out-of-memory kill or a closed "
-        "terminal). Its worker ran in its own session and may still be alive: check for a "
-        "worker process in the registered path first. Then inspect the commits that landed "
-        "since started_at, the tree and the open tasknote; resume partial work attended and "
-        "verify the atomic PLAN/archive/deliverable commit before rerunning."
-    ),
-}
-_RECOVERY["worker-start"] = _RECOVERY["provider"]
-_RECOVERY["report"] = _RECOVERY["interrupted"]
-_RECOVERY["orchestrator-error"] = _RECOVERY["interrupted"]
-
-
-def _outcome_recovery(
-    last: RunRecord,
-    *,
-    nothing_ran: bool = False,
-    worker_log: str | None = None,
-    descoped: bool = False,
-) -> str:
-    if last.outcome is Outcome.BLOCKED:
-        if descoped:
-            return (
-                f"{last.task_id} parked on a De-scope verdict, so there is no work to resume. "
-                "Read the verdict in its tasknote, then confirm and close the row attended "
-                "(PLAN flip and archive); do not relaunch the parked row headless."
-            )
-        return (
-            f"Resolve the park reason, then resume {last.task_id} attended with "
-            f"/ft-task {last.task_id}; do not relaunch the parked row headless."
-        )
-    if last.commit_sha is not None:
-        return (
-            "Inspect the recorded closure outcome and commit before approving the remaining "
-            "queue; a committed de-scope or no-tasknote close does not authorize continuation."
-        )
-    if last.escalation_reason is not None and last.escalation_reason.value == "worker-launch":
-        return _RECOVERY["worker-start"]
-    if nothing_ran and last.escalation_reason is Escalation.WORKER_EXITED:
-        where = f"the worker log ({worker_log})" if worker_log else "the escalation summary"
-        return (
-            f"Nothing ran for {last.task_id}: the worker exited without touching the tree or "
-            f"HEAD (clean tree, HEAD unmoved, no tasknote), so there is no partial work to "
-            f"resume. Read {where} for why it stopped before rerunning."
-        )
-    if nothing_ran:
-        return (
-            f"Nothing ran for {last.task_id}: the provider refused before any work "
-            "(clean tree, HEAD unmoved). Rerunning is safe once the provider has usage."
-        )
-    return (
-        f"Committed closure evidence is missing for {last.task_id}. Inspect HEAD, tree, "
-        "tasknote and worker log; resume partial work attended and verify the atomic "
-        "PLAN/archive/deliverable commit before rerunning."
-    )
-
-
-def _parked_descoped(last: RunRecord, tasknote_path: str | None) -> bool:
-    """A parked note whose Relevance verdict is De-scope has nothing left to resume."""
-    if last.outcome is not Outcome.BLOCKED or tasknote_path is None:
-        return False
-    text = read_text_or_none(Path(tasknote_path))
-    return text is not None and is_descoped(text)
-
-
-def recovery_steps(
-    result: InvocationResult, last: RunRecord | None, start_sha: str | None = None
-) -> list[str]:
-    """Safe operator actions, never automatic cleanup or a generic retry."""
-    if result.status is InvocationStatus.OBSERVED:
-        return []
-    steps: list[str] = []
-    reason = result.stop_reason
-    if reason == "outcome" and last is not None:
-        nothing_ran = (
-            (
-                last.escalation_reason is Escalation.WORKER_ERROR
-                or (
-                    last.escalation_reason is Escalation.WORKER_EXITED
-                    and result.tasknote_path is None
-                )
-            )
-            and result.tree == []
-            and start_sha is not None
-            and result.head_sha == start_sha
-        )
-        steps.append(
-            _outcome_recovery(
-                last,
-                nothing_ran=nothing_ran,
-                worker_log=result.worker_log,
-                descoped=_parked_descoped(last, result.tasknote_path),
-            )
-        )
-    elif reason in _RECOVERY:
-        steps.append(_RECOVERY[reason])
-    elif reason not in {"empty", "complete", "incomplete", "gated", "denied"}:
-        steps.append(
-            "Resolve the reported configuration/readiness error, then inspect caobunga status "
-            "for this project before rerunning."
-        )
-    if result.remaining_tasks or result.denials:
-        steps.append(
-            "Review remaining tasks and each denial: resolve dependencies and parks, perform "
-            "handoffs attended, and review unmarked rows with Flaitron seeding. "
-            "Caobunga does not mark or clean the repo."
-        )
-    if result.unparsed_lines:
-        steps.append(
-            "Review the listed malformed PLAN rows; fix their syntax and approval explicitly "
-            "before rerunning."
-        )
-    if (
-        last is not None
-        and last.escalation_reason is not None
-        and last.escalation_reason.value == "timeout"
-    ):
-        steps.append(
-            f"Worker exceeded {result.timeout_seconds}s. Shutdown state is "
-            f"{result.shutdown or 'unknown'}; verify remaining processes are stopped before "
-            "attending to partial work."
-        )
-    if result.shutdown == "failed":
-        steps.append(
-            "Worker shutdown failed; confirm its processes are stopped before any new launch."
-        )
-    return steps
 
 
 def _pid_alive(pid: int) -> bool:
@@ -457,6 +332,95 @@ def _pid_alive(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def receipt_alive(receipt: InvocationResult) -> bool | None:
+    """A `running` receipt's orchestrator verdict without the run lock (CBN-421).
+
+    `None` when it carries no pid: only `reconcile_stale`, holding the lock, can
+    call a legacy receipt dead.
+    """
+    return None if receipt.pid is None else _pid_alive(receipt.pid)
+
+
+def running_verdicts(
+    store: Store, project_id: str | None
+) -> list[tuple[InvocationResult, bool | None]]:
+    """Each `running` receipt with its `receipt_alive` verdict, for `status` (CBN-421).
+
+    A dead pid is checked against a re-read: a run that wrote its terminal
+    receipt and exited after the scan is finished, not stale.
+    """
+    verdicts: list[tuple[InvocationResult, bool | None]] = []
+    for receipt in store.running_invocations(project_id):
+        alive = receipt_alive(receipt)
+        if alive is False:
+            try:
+                current = store.load_invocation(receipt.receipt_id)
+            except (OSError, UserError, yaml.YAMLError, ValidationError):
+                current = None
+            if current is None or current.status is not InvocationStatus.RUNNING:
+                continue
+        verdicts.append((receipt, alive))
+    return verdicts
+
+
+def _live_worktree(receipt: InvocationResult) -> WorktreeRun | None:
+    """The worktree a receipt's unfinished task ran in, when it names one (CBN-EPIC-450.6)."""
+    entries = receipt.worktrees
+    return entries[-1] if entries and entries[-1].landing is None else None
+
+
+def evidence_root(receipt: InvocationResult, registered: str) -> Path:
+    """Where a dead run's work is: its live worktree's execution root, else its own path.
+
+    An isolated run commits on its `wt-<ID>` branch, so main's `HEAD` would show
+    none of it. A worktree removed by hand falls back to the path, which is the
+    only place left to read.
+    """
+    live = _live_worktree(receipt)
+    if live is not None and Path(live.execution_root).is_dir():
+        return Path(live.execution_root)
+    return Path(receipt.path or registered)
+
+
+def _landed(receipt: InvocationResult, root: Path) -> list[str] | None:
+    """A dead run's commits: its branch's own (`base..HEAD`) when read from its
+    live worktree, else HEAD's since the receipt started."""
+    live = _live_worktree(receipt)
+    if live is not None and root == Path(live.execution_root):
+        return commits_after(root, live.base_sha)
+    return commits_since(root, receipt.started_at)
+
+
+def stale_receipts(
+    record: RegistryRecord, verdicts: Sequence[tuple[InvocationResult, bool | None]]
+) -> list[StaleReceipt]:
+    """`record`'s proven-dead receipts among `verdicts`, with commits landed since (CBN-444).
+
+    The surfaces' shared read, so `status`, the digest and the Status API name
+    the same work: a dead run that committed before dying otherwise shows the
+    previous task everywhere until the slug's next `run`. Landed is read from
+    the receipt's own path (its live worktree for an isolated run), as
+    `reconcile_stale` does, since the slug may have moved. A pid-less receipt
+    is not proven dead without the lock, so it is left out, on CBN-421's footer
+    rule.
+    """
+    stale: list[StaleReceipt] = []
+    for receipt, alive in verdicts:
+        if alive is not False or receipt.project != record.id or receipt.pid is None:
+            continue
+        stale.append(
+            StaleReceipt(
+                receipt_id=receipt.receipt_id,
+                task_id=receipt.task_id,
+                pid=receipt.pid,
+                started_at=receipt.started_at,
+                last_stage=receipt.stop_reason.value,
+                landed=_landed(receipt, evidence_root(receipt, record.path)),
+            )
+        )
+    return stale
 
 
 def reconcile_stale(
@@ -480,29 +444,42 @@ def reconcile_stale(
     for stale in store.running_invocations(record.id):
         if stale.receipt_id == own_receipt_id:
             continue
-        if stale.pid is None:
-            if stale.path != record.path:
-                continue
-        elif _pid_alive(stale.pid):
+        alive = receipt_alive(stale)
+        if alive or (alive is None and stale.path != record.path):
             continue
         stage = stale.stop_reason
         pid = f"pid {stale.pid}" if stale.pid is not None else "pid unrecorded"
         stale.status = InvocationStatus.ABANDONED
-        stale.stop_reason = "process-gone"
+        stale.stop_reason = StopReason.PROCESS_GONE
         stale.finished_at = utc_now()
+        root = evidence_root(stale, record.path)
+        # Unsettled means never landed: its branch, if still there, holds the work.
+        live = _live_worktree(stale)
         try:
-            _snapshot(stale, None)
+            _snapshot(stale, None, root)
         except (OSError, UserError):
             stale.head_sha = None
             stale.tree = None
         # The dead run's own repo, the one `_snapshot` read: the slug may have moved since.
-        landed = commits_since(Path(stale.path or record.path), stale.started_at)
+        landed = _landed(stale, root)
         landed_text = "unreadable" if landed is None else f"{len(landed)} commit(s)"
+        on_branch = live is not None and root == Path(live.execution_root)
+        where = f"{live.branch} since its base" if on_branch and live else "HEAD since started_at"
         stale.detail = (
             f"Orchestrator gone while running ({pid}, last stage {stage}); found by "
-            f"invocation {own_receipt_id}. Landed on HEAD since started_at: {landed_text}."
+            f"invocation {own_receipt_id}. Landed on {where}: {landed_text}."
         )
         stale.recovery = recovery_steps(stale, None)
+        if live is not None:
+            live.landing = LandingState.RETAINED
+            stale.recovery.append(
+                retained_recovery(
+                    branch=live.branch,
+                    worker_root=live.worker_root,
+                    landing_root=live.landing_root,
+                    base_sha=live.base_sha,
+                )
+            )
         try:
             path = store.write_invocation(stale)
         except OSError as exc:
